@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mirror-host-agent"
+version = "0.0.0"
+description = "Local-only WebRTC host agent (M0 synthetic, M1 Desktop Duplication capture)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "aiortc>=1.14,<2",
+  "numpy>=2.2,<3",
+  "websockets>=15,<16",
+  "Pillow>=10,<13; sys_platform == 'win32'",
+  "pystray>=0.19,<1; sys_platform == 'win32'",
+]
+
+# Real screen capture is Windows-only (DXGI Desktop Duplication). Kept optional so
+# the synthetic M0 path stays installable and testable on any platform.
+[project.optional-dependencies]
+capture = [
+  "dxcam>=0.0.5; sys_platform == 'win32'",
+]
+
+[project.scripts]
+mirror-host-agent = "mirror_host_agent.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "my-mirror-signaling",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-04",
+  // Pages+Worker topology (ADR-020): this Worker serves only /ws + /health and is
+  // NOT behind Access (the agent cannot pass Access; the viewer presents a
+  // session ticket). The viewer and the Access-gated /session/ticket live on
+  // Cloudflare Pages. Access cannot protect *.workers.dev, which is why the
+  // Access-gated surface is on Pages, not here.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSION_ROOMS",
+        "class_name": "SessionRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionRoom"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "my-mirror",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

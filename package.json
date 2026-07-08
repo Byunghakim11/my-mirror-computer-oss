@@ -1,0 +1,29 @@
+{
+  "name": "my-mirror-computer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/viewer",
+    "apps/signaling",
+    "packages/protocol"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test:m0:e2e": "tsx scripts/m0-e2e.ts",
+    "test:origin": "tsx scripts/origin-matrix.ts",
+    "test:python": "\".\\.venv\\Scripts\\python.exe\" -m unittest discover -s apps\\host-agent\\tests -v",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspace @mirror/protocol && npm run test --workspace @mirror/viewer && npm run test --workspace @mirror/signaling && npm run test:origin && npm run test:python",
+    "verify:local": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "playwright": "^1.61.1",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.0"
+  }
+}

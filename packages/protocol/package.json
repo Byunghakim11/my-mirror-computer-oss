@@ -1,0 +1,23 @@
+{
+  "name": "@mirror/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./sessionTicket": "./src/sessionTicket.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.0",
+    "ajv": "^8.0.0",
+    "ajv-formats": "^3.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  }
+}

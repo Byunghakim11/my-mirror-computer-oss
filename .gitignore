@@ -1,0 +1,44 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.dev.vars
+!.dev.vars.example
+.dev-agent.pid
+*.pem
+*.key
+# Generated agent launcher — contains a device token (M3). Never commit.
+run-agent.ps1
+
+# JavaScript
+node_modules/
+dist/
+coverage/
+.wrangler/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Test artifacts
+playwright-report/
+test-results/
+artifacts/
+.reviews/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local Codex runtime state (keep project config and role definitions)
+.codex/tmp/
+.codex/logs/
