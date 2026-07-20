@@ -51,6 +51,13 @@ class LetterboxFitTests(unittest.TestCase):
         self.assertLessEqual(fit.offset_x + fit.width, 1280)
         self.assertLessEqual(fit.offset_y + fit.height, 720)
 
+    def test_16_10_source_fills_16_10_high_profile_with_no_dead_zones(self) -> None:
+        # 1920x1200 desktop into the "high" profile's 1600x1000 (also 16:10)
+        # canvas must fill it exactly -- no pillarbox bars, every pixel live.
+        fit = compute_letterbox_fit(1920, 1200, 1600, 1000)
+        self.assertEqual((fit.width, fit.height), (1600, 1000))
+        self.assertEqual((fit.offset_x, fit.offset_y), (0, 0))
+
     def test_rejects_non_positive_dimensions(self) -> None:
         with self.assertRaises(ValueError):
             compute_letterbox_fit(0, 100, 1280, 720)
@@ -91,6 +98,16 @@ class VideoProfileTests(unittest.TestCase):
     def test_unknown_profile_raises(self) -> None:
         with self.assertRaises(ValueError):
             get_profile("ultra")
+
+    def test_high_profile_is_1600x1000_16_10(self) -> None:
+        # 16:10 matches a 1920x1200 desktop exactly (see compute_letterbox_fit
+        # test above), so this profile has no pillarbox dead zones.
+        high = get_profile("high")
+        self.assertEqual((high.width, high.height, high.fps), (1600, 1000, 20))
+        self.assertEqual(high.name, "high")
+        # The factory must accept the new profile like any other.
+        track = create_video_track("desktop", high)
+        self.assertIsInstance(track, DesktopDuplicationTrack)
 
     def test_synthetic_track_honors_profile_size(self) -> None:
         track = SyntheticVideoTrack(PROFILE_LOW)
@@ -137,6 +154,26 @@ class CreateVideoTrackTests(unittest.TestCase):
         track = create_video_track("desktop")
         self.assertIsInstance(track, DesktopDuplicationTrack)
         self.assertEqual(track.restart_count, 0)
+
+    def test_capture_fault_recovers_once_then_backs_off(self) -> None:
+        # A capture fault must recover exactly once, then hold off (not rebuild
+        # every frame) until the retry window elapses — the black-screen loop was
+        # an endless per-frame rebuild.
+        track = create_video_track("desktop")
+
+        def boom() -> None:
+            raise RuntimeError("simulated capture fault")
+
+        track._ensure_camera = boom  # type: ignore[method-assign]
+
+        self.assertIsNone(track._grab_rgb())  # first attempt faults + recovers
+        self.assertEqual(track.restart_count, 1)
+        self.assertIsNone(track._grab_rgb())  # within backoff: no rebuild attempt
+        self.assertEqual(track.restart_count, 1)
+
+        track._recover_not_before = 0.0  # simulate the retry window elapsing
+        self.assertIsNone(track._grab_rgb())
+        self.assertEqual(track.restart_count, 2)
 
     def test_unknown_source_raises(self) -> None:
         with self.assertRaises(ValueError):

@@ -1,6 +1,7 @@
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react'
 
 import { MobileKeyboard } from './MobileKeyboard'
+import { RemoteClipboard } from './RemoteClipboard'
 import { useInputCapture } from './useInputCapture'
 import { useRemoteSession } from './useRemoteSession'
 import {
@@ -48,6 +49,17 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   }
 }
 
+// Win+Shift+S (Windows screenshot/snip tool). Press modifiers down in order,
+// then release in reverse order so the remote OS sees a well-formed chord.
+function sendCaptureShortcut(sendKey: (code: string, action: 'down' | 'up') => void): void {
+  sendKey('MetaLeft', 'down')
+  sendKey('ShiftLeft', 'down')
+  sendKey('KeyS', 'down')
+  sendKey('KeyS', 'up')
+  sendKey('ShiftLeft', 'up')
+  sendKey('MetaLeft', 'up')
+}
+
 const FILE_STATUS_LABEL: Record<string, string> = {
   preparing: '준비 중…',
   sending: '전송 중',
@@ -89,6 +101,7 @@ export function App() {
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 })
   const [presentationError, setPresentationError] = useState<string | null>(null)
   const [keyboardOpen, setKeyboardOpen] = useState(false)
+  const [clipboardPanelOpen, setClipboardPanelOpen] = useState(false)
   const [downloadPanelOpen, setDownloadPanelOpen] = useState(false)
   const [toolbarHidden, setToolbarHidden] = useState(false)
   const [copiedClipboardId, setCopiedClipboardId] = useState<number | null>(null)
@@ -253,12 +266,15 @@ export function App() {
               data-testid="video-profile-select"
               disabled={session.videoProfilePending}
               onChange={(event) =>
-                session.setVideoProfile(event.target.value as 'low' | 'balanced')
+                session.setVideoProfile(
+                  event.target.value as 'low' | 'balanced' | 'high',
+                )
               }
               value={session.videoProfile}
             >
               <option value="low">Low · 540p/10fps</option>
               <option value="balanced">Balanced · 720p/15fps</option>
+              <option value="high">High · 1600×1000/20fps</option>
             </select>
           </label>
           {session.videoProfilePending && (
@@ -298,6 +314,37 @@ export function App() {
             type="button"
           >
             {keyboardOpen ? '키보드 끄기' : '한글 키보드'}
+          </button>
+          <button
+            data-testid="hangul-toggle-button"
+            disabled={!session.isControlActive}
+            onClick={() => {
+              session.sendKey('Lang1', 'down')
+              session.sendKey('Lang1', 'up')
+            }}
+            title="원격 PC의 한글/영어 IME를 전환"
+            type="button"
+          >
+            한/영
+          </button>
+          <button
+            data-testid="capture-button"
+            disabled={!session.isControlActive}
+            onClick={() => sendCaptureShortcut(session.sendKey)}
+            title="집 PC의 캡처 도구 실행 (Win+Shift+S)"
+            type="button"
+          >
+            캡처
+          </button>
+          <button
+            aria-pressed={clipboardPanelOpen}
+            data-testid="clipboard-button"
+            disabled={!session.isControlActive}
+            onClick={() => setClipboardPanelOpen((open) => !open)}
+            title="회사 PC에서 복사한 텍스트를 붙여넣어 집 PC 커서 위치에 입력"
+            type="button"
+          >
+            {clipboardPanelOpen ? '클립보드 끄기' : '클립보드'}
           </button>
           <button
             data-testid="file-send-button"
@@ -521,6 +568,13 @@ export function App() {
         )}
         {keyboardOpen && session.isControlActive && (
           <MobileKeyboard sendKey={session.sendKey} sendText={session.sendText} />
+        )}
+        {clipboardPanelOpen && session.isControlActive && (
+          <RemoteClipboard
+            onClose={() => setClipboardPanelOpen(false)}
+            sendKey={session.sendKey}
+            setRemoteClipboard={session.setRemoteClipboard}
+          />
         )}
         {controlLabel && (
           <div className="control-status">

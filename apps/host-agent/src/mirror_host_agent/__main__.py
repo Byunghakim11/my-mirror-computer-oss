@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from .input_control import InputController, InputSink
 from .outgoing import list_outgoing, resolve_outgoing_file
 from .video import (
     DESKTOP_SOURCE,
+    PROFILES,
     SYNTHETIC_SOURCE,
     SyntheticVideoTrack,  # re-exported for tests and existing import paths
     create_video_track,
@@ -37,11 +39,20 @@ from .video import (
 LOGGER = logging.getLogger("mirror_host_agent")
 PROTOCOL_VERSION = 1
 MAX_SIGNALING_BYTES = 256 * 1024
-MAX_CONTROL_BYTES = 4096
+# Raw per-message cap on the control DataChannel. Sized for the largest control
+# message: a clipboard.set carrying up to CLIPBOARD_TEXT_MAX_LENGTH (16384)
+# characters — worst-case ~4 UTF-8 bytes each — plus the JSON envelope. Pointer
+# and key events are two orders of magnitude smaller and their handlers cap
+# individual fields, so this headroom does not loosen their validation.
+MAX_CONTROL_BYTES = 72 * 1024
 DEFAULT_VIDEO_PROFILE = "balanced"
 CONTROL_WATCHDOG_INTERVAL_SECONDS = 1.0
 CONTROL_GRANT_TTL_MS = 60 * 60 * 1000
 CLIPBOARD_POLL_INTERVAL_SECONDS = 0.7
+# Minimum spacing between accepted viewer->host clipboard writes. One paste sends
+# a single clipboard.set, so this never affects normal use; it just bounds a
+# granted viewer clobbering the host user's clipboard in a tight loop.
+CLIPBOARD_SET_MIN_INTERVAL_SECONDS = 0.2
 CONTROL_TIMESTAMP_SKEW_MS = 30_000
 # Per-chunk cap on the file DataChannel — bounds memory and matches the viewer's
 # send size. The whole-file cap is enforced by FileReceiver (ADR-014).
@@ -124,6 +135,7 @@ class M0Agent:
         self._control_channel: RTCDataChannel | None = None
         self._clipboard_task: asyncio.Task[None] | None = None
         self._last_clipboard_text: str | None = None
+        self._last_clipboard_set_monotonic: float | None = None
         # Sandboxed file receive (ADR-014), opt-in and default off.
         self._files_enabled = config.files_enabled
         self._files_dir = Path(config.files_dir) if config.files_dir else None
@@ -325,7 +337,7 @@ class M0Agent:
         if message_type == "session.request":
             requested = message["payload"].get("permission")
             requested_profile = message["payload"].get("videoProfile")
-            if requested_profile in {"low", "balanced"}:
+            if requested_profile in PROFILES:
                 self._video_profile = get_profile(requested_profile)
             # A viewer must not be able to extend or reset an active control
             # grant by re-requesting. The grant TTL is anchored to the original
@@ -402,7 +414,7 @@ class M0Agent:
 
         if message_type == "session.configure":
             profile_name = message["payload"].get("videoProfile")
-            if profile_name not in {"low", "balanced"}:
+            if profile_name not in PROFILES:
                 await self._send_error(websocket, "INVALID_VIDEO_PROFILE", False)
                 return
             if self._video_sender is None:
@@ -494,6 +506,18 @@ class M0Agent:
             configuration=RTCConfiguration(iceServers=await self._fetch_ice_servers())
         )
         self._peer = peer
+
+        # Diagnostic only: surface WebRTC/ICE state transitions so intermittent
+        # drops on flaky networks (corporate Wi-Fi, TURN relay) are visible in
+        # the agent log. No frame/coordinate/keystroke content is logged.
+        @peer.on("connectionstatechange")
+        def on_connection_state_change() -> None:
+            LOGGER.info("WebRTC connection=%s", peer.connectionState)
+
+        @peer.on("iceconnectionstatechange")
+        def on_ice_connection_state_change() -> None:
+            LOGGER.info("WebRTC ice=%s", peer.iceConnectionState)
+
         track = create_video_track(self._video_source, self._video_profile)
         self._video_track = track
         self._video_sender = peer.addTrack(track)
@@ -624,10 +648,45 @@ class M0Agent:
         message = self._parse_control(raw_control)
         if message is None:
             return
+        if message["event"] == "clipboard.set":
+            self._handle_clipboard_set(message["data"])
+            return
         source = getattr(self._video_track, "source_size", None)
         if source is not None:
             controller.set_source_size(source[0], source[1])
         controller.handle(message, now=time.monotonic())
+
+    def _handle_clipboard_set(self, data: dict[str, Any]) -> None:
+        """Write viewer-supplied text to the host clipboard (viewer -> agent).
+
+        Gated behind the same opt-in flag as the host->viewer mirror; reaching
+        here already implies control is granted and active. Never logs content.
+
+        The Win32 write runs synchronously on the event-loop thread on purpose:
+        a paste sends clipboard.set immediately followed by a Ctrl+V key chord on
+        the same ordered channel, so the clipboard MUST be written before those
+        key events are processed. Offloading to an executor would race the paste.
+        """
+        if not self._clipboard_enabled:
+            return
+        text = data.get("text")
+        if not isinstance(text, str) or not text:
+            return
+        now = time.monotonic()
+        last = self._last_clipboard_set_monotonic
+        if last is not None and now - last < CLIPBOARD_SET_MIN_INTERVAL_SECONDS:
+            return
+        self._last_clipboard_set_monotonic = now
+
+        from .windows_clipboard import CLIPBOARD_TEXT_MAX_LENGTH, write_clipboard_text
+
+        payload = text[:CLIPBOARD_TEXT_MAX_LENGTH]
+        ok = write_clipboard_text(payload)
+        LOGGER.info(
+            "Clipboard set from viewer: %s (%d chars)",
+            "ok" if ok else "failed",
+            len(payload),
+        )
 
     def _parse_control(self, raw_control: Any) -> dict[str, Any] | None:
         if not isinstance(raw_control, str) or len(raw_control.encode()) > MAX_CONTROL_BYTES:
@@ -1079,13 +1138,34 @@ async def run_agent() -> None:
     emergency_stop_monitor: Any = None
     tray_controller: Any = None
     if sys.platform == "win32":
+        from . import keep_awake
         from .windows_emergency_stop import WindowsEmergencyStopMonitor
         from .tray import TrayController
 
+        # Keep the SYSTEM awake for the lifetime of the agent so the home PC
+        # never sleeps, while still letting the DISPLAY turn off on its own to
+        # save power (woken on demand below when a viewer connects).
+        keep_awake.prevent_system_sleep()
+
         loop = asyncio.get_running_loop()
+        agent_task = asyncio.current_task()
         emergency_stop_monitor = WindowsEmergencyStopMonitor(
             lambda: loop.call_soon_threadsafe(agent.emergency_stop)
         )
+
+        last_status = "offline"
+
+        def on_status_change(status: str) -> None:
+            nonlocal last_status
+            if status in ("viewing", "controlling") and last_status not in (
+                "viewing",
+                "controlling",
+            ):
+                keep_awake.wake_display()
+            last_status = status
+            if tray_controller is not None:
+                tray_controller.set_status(status)
+
         try:
             emergency_stop_monitor.start()
             tray_controller = TrayController(
@@ -1096,8 +1176,16 @@ async def run_agent() -> None:
                 on_emergency_lock=lambda: loop.call_soon_threadsafe(
                     agent.emergency_stop
                 ),
+                on_restart=lambda: loop.call_soon_threadsafe(
+                    _restart_agent, agent_task
+                ),
+                on_open_folder=lambda: _open_files_folder(agent),
+                on_wake_display=keep_awake.wake_display,
+                on_quit=lambda: loop.call_soon_threadsafe(
+                    _quit_agent, agent_task
+                ),
             )
-            agent.set_status_listener(tray_controller.set_status)
+            agent.set_status_listener(on_status_change)
             tray_controller.start()
             LOGGER.warning("Tray ready; Ctrl+Alt+F12 locks remote control")
         except Exception as error:  # noqa: BLE001 - fail closed if local safety UI fails
@@ -1109,11 +1197,65 @@ async def run_agent() -> None:
             tray_controller = None
     try:
         await agent.run_forever()
+    except asyncio.CancelledError:
+        LOGGER.info("M0 agent shutdown requested")
     finally:
         if emergency_stop_monitor is not None:
             emergency_stop_monitor.stop()
         if tray_controller is not None:
             tray_controller.stop()
+        if sys.platform == "win32":
+            from . import keep_awake
+
+            keep_awake.allow_sleep()
+
+
+def _quit_agent(agent_task: "asyncio.Task[None] | None") -> None:
+    """Best-effort clean shutdown triggered from the tray thread. Cancelling
+    the task running run_forever() unwinds the same way Ctrl+C does."""
+    if agent_task is not None and not agent_task.done():
+        agent_task.cancel()
+
+
+def _restart_agent(agent_task: "asyncio.Task[None] | None") -> None:
+    """Best-effort restart: the agent normally runs under the Windows
+    Scheduled Task `MirrorHostAgent`. Spawn a detached helper that ends and
+    re-runs that task, then cleanly shut down this process so the task
+    scheduler starts a fresh instance."""
+    try:
+        creationflags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+        # End the task, then WAIT for THIS process to actually exit before /Run,
+        # so a slow graceful teardown (peer close, tray join) can never overlap a
+        # fresh instance. The only interpolated value is our own PID (an int from
+        # os.getpid()), never external input — no shell-injection surface.
+        pid = os.getpid()
+        command = (
+            "schtasks /End /TN MirrorHostAgent; "
+            f"Wait-Process -Id {pid} -Timeout 15 -ErrorAction SilentlyContinue; "
+            "schtasks /Run /TN MirrorHostAgent"
+        )
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell, no external input
+            ["powershell", "-NoProfile", "-Command", command],
+            creationflags=creationflags,
+            close_fds=True,
+        )
+        LOGGER.info("Restart requested; relaunch helper spawned")
+    except Exception as error:  # noqa: BLE001 - best-effort
+        LOGGER.warning("Could not spawn restart helper: %s", type(error).__name__)
+    _quit_agent(agent_task)
+
+
+def _open_files_folder(agent: "M0Agent") -> None:
+    """Best-effort: open the agent's configured MirrorShare folder (or the
+    default location if files are disabled/unset) in Explorer."""
+    files_dir = agent._files_dir or (Path.home() / DEFAULT_FILES_DIRNAME)
+    try:
+        files_dir.mkdir(parents=True, exist_ok=True)
+        os.startfile(files_dir)  # noqa: S606 - Windows-only, fixed local path
+    except Exception as error:  # noqa: BLE001 - best-effort
+        LOGGER.warning("Could not open files folder: %s", type(error).__name__)
 
 
 def main() -> None:

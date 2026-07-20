@@ -616,6 +616,72 @@ h1 {
   border-radius: 0.7rem;
 }
 
+/* Clipboard surface (company PC -> home PC): type or paste, then Ctrl+V remote */
+.remote-clipboard {
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: 4rem;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.7rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.92);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.remote-clipboard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.remote-clipboard-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.remote-clipboard-head button {
+  min-width: 2.2rem;
+  min-height: 2.2rem;
+  border-radius: 0.6rem;
+}
+
+.remote-clipboard-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 3.4rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.7rem;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.85);
+  color: #e2e8f0;
+  font-size: 16px;
+  font-family: inherit;
+}
+
+.remote-clipboard-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.remote-clipboard-actions button {
+  min-height: 2.6rem;
+  padding: 0 1rem;
+  border-radius: 0.7rem;
+  font-size: 1rem;
+}
+
+.remote-clipboard-status {
+  font-size: 0.85rem;
+  color: #86efac;
+}
+
 /* File transfer (viewer -> home PC Incoming) */
 .visually-hidden-input {
   position: absolute;

@@ -18,10 +18,14 @@ export const CONTROL_EVENTS = [
   'session.ping',
   'session.pong',
   'clipboard.text',
+  'clipboard.set',
 ] as const
 
-// Clipboard text is agent -> viewer only, size-capped per ADR-017 (text-only,
-// bounded, staged in the viewer until an explicit user copy).
+// clipboard.text is agent -> viewer (host clipboard mirrored to the viewer, per
+// ADR-017). clipboard.set is the reverse: viewer -> agent, writing the host
+// clipboard so the user can Ctrl+V text they typed/pasted in the viewer. Both
+// share the same size cap; the agent only writes when clipboard sharing is
+// enabled and control is active.
 const CLIPBOARD_TEXT_MAX_LENGTH = 16_384
 
 // Composed text from the mobile soft keyboard (viewer -> agent), injected as
@@ -53,7 +57,7 @@ const KEYBOARD_CODE_PATTERN = [
   '^(?:Key[A-Z]|Digit[0-9]|Arrow(?:Up|Down|Left|Right)',
   '|F(?:[1-9]|1[0-2])|Backspace|Tab|Enter|Escape|Space|Delete',
   '|Home|End|PageUp|PageDown|Shift(?:Left|Right)',
-  '|Control(?:Left|Right)|Alt(?:Left|Right)',
+  '|Control(?:Left|Right)|Alt(?:Left|Right)|Meta(?:Left|Right)',
   // OEM punctuation (US layout) so keys like / . , ; ' etc. reach the host.
   '|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon',
   '|Quote|Backquote|Comma|Period|Slash',
@@ -130,6 +134,13 @@ export const ControlMessageSchema = Type.Union(
       'clipboard.text',
       Type.Object(
         { text: Type.String({ maxLength: CLIPBOARD_TEXT_MAX_LENGTH }) },
+        messageOptions,
+      ),
+    ),
+    createEnvelope(
+      'clipboard.set',
+      Type.Object(
+        { text: Type.String({ maxLength: CLIPBOARD_TEXT_MAX_LENGTH, minLength: 1 }) },
         messageOptions,
       ),
     ),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from typing import Any
 
 STATUS_LABELS = {
     "offline": "오프라인",
@@ -28,12 +29,20 @@ class TrayController:
         control_enabled: bool,
         on_control_change: Callable[[bool], None],
         on_emergency_lock: Callable[[], None],
+        on_restart: Callable[[], None] | None = None,
+        on_open_folder: Callable[[], None] | None = None,
+        on_wake_display: Callable[[], None] | None = None,
+        on_quit: Callable[[], None] | None = None,
     ) -> None:
         self.status = "offline"
         self.control_enabled = control_enabled
         self.locked = False
         self._on_control_change = on_control_change
         self._on_emergency_lock = on_emergency_lock
+        self._on_restart = on_restart
+        self._on_open_folder = on_open_folder
+        self._on_wake_display = on_wake_display
+        self._on_quit = on_quit
         self._icon = None
         self._thread: threading.Thread | None = None
 
@@ -71,24 +80,59 @@ class TrayController:
             return image
 
         self._make_image = make_image
+        menu_items: list[Any] = [
+            pystray.MenuItem(lambda _item: self._title(), None, enabled=False),
+        ]
+        if self._on_restart is not None:
+            menu_items.append(
+                pystray.MenuItem(
+                    "에이전트 재시작", lambda _icon, _item: self._on_restart()
+                )
+            )
+        if self._on_open_folder is not None:
+            menu_items.append(
+                pystray.MenuItem(
+                    "MirrorShare 폴더 열기",
+                    lambda _icon, _item: self._on_open_folder(),
+                )
+            )
+        if self._on_wake_display is not None:
+            menu_items.append(
+                pystray.MenuItem(
+                    "화면 깨우기", lambda _icon, _item: self._on_wake_display()
+                )
+            )
+        if menu_items and (
+            self._on_restart is not None
+            or self._on_open_folder is not None
+            or self._on_wake_display is not None
+        ):
+            menu_items.append(pystray.Menu.SEPARATOR)
+        menu_items.append(
+            pystray.MenuItem(
+                "원격 제어 허용",
+                lambda _icon, _item: self.toggle_control(),
+                checked=lambda _item: self.control_enabled,
+                enabled=lambda _item: not self.locked,
+            )
+        )
+        menu_items.append(
+            pystray.MenuItem(
+                "긴급 잠금 (재시작 전까지)",
+                lambda _icon, _item: self.emergency_lock(),
+                enabled=lambda _item: not self.locked,
+            )
+        )
+        if self._on_quit is not None:
+            menu_items.append(pystray.Menu.SEPARATOR)
+            menu_items.append(
+                pystray.MenuItem("종료", lambda _icon, _item: self._on_quit())
+            )
         self._icon = pystray.Icon(
             "my-mirror-computer",
             make_image(STATUS_COLORS[self.status]),
             self._title(),
-            menu=pystray.Menu(
-                pystray.MenuItem(lambda _item: self._title(), None, enabled=False),
-                pystray.MenuItem(
-                    "원격 제어 허용",
-                    lambda _icon, _item: self.toggle_control(),
-                    checked=lambda _item: self.control_enabled,
-                    enabled=lambda _item: not self.locked,
-                ),
-                pystray.MenuItem(
-                    "긴급 잠금 (재시작 전까지)",
-                    lambda _icon, _item: self.emergency_lock(),
-                    enabled=lambda _item: not self.locked,
-                ),
-            ),
+            menu=pystray.Menu(*menu_items),
         )
         self._thread = threading.Thread(
             target=self._icon.run,

@@ -116,11 +116,21 @@ class InputControllerTests(unittest.TestCase):
         self.assertIn(("key", "ShiftLeft", "up"), sink.calls)
         self.assertIn(("key", "KeyA", "up"), sink.calls)
 
-    def test_key_whitelist_rejects_meta(self) -> None:
+    def test_key_whitelist_rejects_unknown_codes(self) -> None:
         controller, sink = _controller()
-        self.assertFalse(controller.handle(_msg("key.down", {"code": "MetaLeft"}, 1), now=0.0))
-        self.assertFalse(controller.handle(_msg("key.down", {"code": "KeyAA"}, 2), now=0.0))
+        self.assertFalse(controller.handle(_msg("key.down", {"code": "KeyAA"}, 1), now=0.0))
+        self.assertFalse(controller.handle(_msg("key.down", {"code": "PowerShell"}, 2), now=0.0))
         self.assertEqual(sink.calls, [])
+
+    def test_key_whitelist_accepts_meta(self) -> None:
+        # MetaLeft/MetaRight (Win key) mirror the protocol allowlist in
+        # packages/protocol/src/schemas/control.ts and map to VK_LWIN/VK_RWIN
+        # in windows_input.py; the secure desktop stays unreachable regardless.
+        controller, sink = _controller()
+        self.assertTrue(
+            controller.handle(_msg("key.down", {"code": "MetaLeft"}, 1), now=0.0)
+        )
+        self.assertIn(("key", "MetaLeft", "down"), sink.calls)
 
     def test_key_whitelist_rejects_trailing_newline(self) -> None:
         # A `$`-anchored pattern would accept "KeyA\n"; fullmatch must reject it.

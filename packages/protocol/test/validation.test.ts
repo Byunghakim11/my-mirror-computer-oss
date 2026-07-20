@@ -62,7 +62,16 @@ describe('control message validation', () => {
     expect(result.ok).toBe(false)
   })
 
-  it.each(['Slash', 'Semicolon', 'Backquote', 'BracketRight', 'Lang1', 'Lang2'])(
+  it.each([
+    'Slash',
+    'Semicolon',
+    'Backquote',
+    'BracketRight',
+    'Lang1',
+    'Lang2',
+    'MetaLeft',
+    'MetaRight',
+  ])(
     'accepts the punctuation/IME key %s',
     (code) => {
       const result = validateControlMessage({
@@ -96,6 +105,32 @@ describe('control message validation', () => {
       data: { text: 'a'.repeat(16_385) },
       event: 'clipboard.text',
       sequence: 7,
+      sessionId: SESSION_ID,
+      timestamp: 1_783_152_000_000,
+      version: 1,
+    })
+
+    expect(result.ok).toBe(false)
+  })
+
+  it('accepts a viewer clipboard.set message', () => {
+    const result = validateControlMessage({
+      data: { text: '회사에서 복사한 텍스트' },
+      event: 'clipboard.set',
+      sequence: 7,
+      sessionId: SESSION_ID,
+      timestamp: 1_783_152_000_000,
+      version: 1,
+    })
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('rejects an empty clipboard.set message', () => {
+    const result = validateControlMessage({
+      data: { text: '' },
+      event: 'clipboard.set',
+      sequence: 8,
       sessionId: SESSION_ID,
       timestamp: 1_783_152_000_000,
       version: 1,
@@ -262,6 +297,18 @@ describe('signaling message validation', () => {
       sequence: 1,
       sessionId: SESSION_ID,
       type: 'session.request',
+      version: 1,
+    })
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('accepts the high video profile in configure', () => {
+    const result = validateSignalingMessage({
+      payload: { videoProfile: 'high' },
+      sequence: 1,
+      sessionId: SESSION_ID,
+      type: 'session.configure',
       version: 1,
     })
 

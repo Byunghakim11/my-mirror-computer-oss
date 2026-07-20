@@ -446,6 +446,34 @@ class VideoProfileConfigureTests(unittest.IsolatedAsyncioTestCase):
         configured = next(m for m in websocket.sent if m["type"] == "session.configured")
         self.assertEqual(configured["payload"], {"videoProfile": "low"})
 
+    async def test_accepts_high_profile(self) -> None:
+        # Regression: the allowlist must track video.PROFILES, not a stale
+        # {"low","balanced"} literal, or the viewer's High option is rejected.
+        agent = self._agent()
+        sender = _FakeSender()
+        agent._video_sender = sender
+        agent._video_track = SyntheticVideoTrack()
+        websocket = _FakeWebSocket()
+
+        await agent._handle_message(websocket, self._message("high"))
+
+        self.assertEqual(agent._video_profile.name, "high")
+        self.assertEqual((agent._video_profile.width, agent._video_profile.height), (1600, 1000))
+        configured = next(m for m in websocket.sent if m["type"] == "session.configured")
+        self.assertEqual(configured["payload"], {"videoProfile": "high"})
+        self.assertFalse(any(m["type"] == "error" for m in websocket.sent))
+
+    async def test_rejects_unknown_profile(self) -> None:
+        agent = self._agent()
+        agent._video_sender = _FakeSender()
+        agent._video_track = SyntheticVideoTrack()
+        websocket = _FakeWebSocket()
+
+        await agent._handle_message(websocket, self._message("ultra"))
+
+        error = next(m for m in websocket.sent if m["type"] == "error")
+        self.assertEqual(error["payload"]["code"], "INVALID_VIDEO_PROFILE")
+
     async def test_rejects_profile_change_without_active_sender(self) -> None:
         agent = self._agent()
         websocket = _FakeWebSocket()
@@ -486,6 +514,59 @@ class ClipboardTests(unittest.TestCase):
         agent = self._agent(clipboard_enabled=False)
         agent._start_clipboard_monitor()
         self.assertIsNone(agent._clipboard_task)
+
+    def test_clipboard_set_writes_host_clipboard_when_enabled(self) -> None:
+        agent = self._agent(clipboard_enabled=True)
+        with patch(
+            "mirror_host_agent.windows_clipboard.write_clipboard_text",
+            return_value=True,
+        ) as writer:
+            agent._handle_clipboard_set({"text": "회사에서 복사한 텍스트"})
+        writer.assert_called_once_with("회사에서 복사한 텍스트")
+
+    def test_clipboard_set_is_noop_when_disabled(self) -> None:
+        agent = self._agent(clipboard_enabled=False)
+        with patch(
+            "mirror_host_agent.windows_clipboard.write_clipboard_text"
+        ) as writer:
+            agent._handle_clipboard_set({"text": "must-not-write"})
+        writer.assert_not_called()
+
+    def test_clipboard_set_ignores_empty_or_non_string(self) -> None:
+        agent = self._agent(clipboard_enabled=True)
+        with patch(
+            "mirror_host_agent.windows_clipboard.write_clipboard_text"
+        ) as writer:
+            agent._handle_clipboard_set({"text": ""})
+            agent._handle_clipboard_set({"text": 123})
+            agent._handle_clipboard_set({})
+        writer.assert_not_called()
+
+    def test_clipboard_set_is_rate_limited(self) -> None:
+        agent = self._agent(clipboard_enabled=True)
+        with patch(
+            "mirror_host_agent.windows_clipboard.write_clipboard_text",
+            return_value=True,
+        ) as writer, patch(
+            "mirror_host_agent.__main__.time.monotonic",
+            side_effect=[100.0, 100.05],
+        ):
+            agent._handle_clipboard_set({"text": "first"})
+            agent._handle_clipboard_set({"text": "second-too-soon"})
+        writer.assert_called_once_with("first")
+
+    def test_clipboard_set_allowed_again_after_interval(self) -> None:
+        agent = self._agent(clipboard_enabled=True)
+        with patch(
+            "mirror_host_agent.windows_clipboard.write_clipboard_text",
+            return_value=True,
+        ) as writer, patch(
+            "mirror_host_agent.__main__.time.monotonic",
+            side_effect=[100.0, 100.5],
+        ):
+            agent._handle_clipboard_set({"text": "first"})
+            agent._handle_clipboard_set({"text": "second-ok"})
+        self.assertEqual(writer.call_count, 2)
 
 
 class SessionAdoptionTests(unittest.IsolatedAsyncioTestCase):

@@ -49,6 +49,10 @@ const PermissionSchema = Type.Union([
 const VideoProfileSchema = Type.Union([
   Type.Literal('low'),
   Type.Literal('balanced'),
+  // High is 16:10 (1600x1000 @20fps) to match a 1920x1200 desktop exactly, so
+  // the encoded frame has no letterbox bars and every on-screen pixel is a live
+  // control target (ADR: higher tier + dead-zone removal).
+  Type.Literal('high'),
 ])
 
 export const SignalingMessageSchema = Type.Union(

@@ -7,8 +7,9 @@ through the ``InputSink`` protocol so all control logic stays testable.
 Injection happens ONLY when a control session is granted and local policy allows
 it. Absolute mouse coordinates are 0..65535 on the primary monitor (no
 ``VIRTUALDESK`` — multi-monitor targeting is out of scope). Keyboard uses a
-whitelist-derived virtual-key map; there is no Meta/Win key and no way to reach
-the secure desktop (UAC / Ctrl+Alt+Del) — those are blocked by the OS.
+whitelist-derived virtual-key map, including the Meta/Win key (VK_LWIN/
+VK_RWIN); there is still no way to reach the secure desktop (UAC /
+Ctrl+Alt+Del) — that is blocked by the OS regardless of injected key codes.
 """
 
 from __future__ import annotations
@@ -74,6 +75,8 @@ def _build_virtual_key_map() -> dict[str, int]:
             "ControlRight": 0xA3,
             "AltLeft": 0xA4,
             "AltRight": 0xA5,
+            "MetaLeft": 0x5B,  # VK_LWIN
+            "MetaRight": 0x5C,  # VK_RWIN
             # OEM punctuation (US layout). Injected as virtual keys so shifted
             # variants still work via the ShiftLeft/ShiftRight modifiers above.
             "Semicolon": 0xBA,  # VK_OEM_1  ;:

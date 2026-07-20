@@ -90,6 +90,11 @@ function newTransferId(): string {
   return `transfer_${encoded}`
 }
 const VIDEO_PROFILE_TIMEOUT_MS = 10_000
+// Self-heal an unexpected drop (WebRTC failed / signaling closed) without making
+// the user click "reconnect". Bounded so a genuinely dead path stops retrying and
+// surfaces the error; the counter resets once a connection reaches 'connected'.
+const AUTO_RECONNECT_MAX_ATTEMPTS = 5
+const AUTO_RECONNECT_DELAY_MS = 2_000
 
 // Preferred receive codec order: H.264 first (hardware-friendly, matches the
 // agent's preference), VP8 as fallback, everything else after.
@@ -152,6 +157,7 @@ interface RemoteSessionState {
   readonly setVideoProfile: (profile: VideoProfile) => void
   readonly sendKey: (code: string, action: KeyAction) => void
   readonly sendText: (text: string) => void
+  readonly setRemoteClipboard: (text: string) => void
   readonly sendPointerButton: (button: PointerButton, action: KeyAction) => void
   readonly sendPointerMove: (x: number, y: number) => void
   readonly sendPointerWheel: (deltaX: number, deltaY: number) => void
@@ -221,6 +227,12 @@ export function useRemoteSession(): RemoteSessionState {
   // superseded cycle is ignored so a late 'close'/'connectionstatechange' event
   // from an old connection can never tear down a freshly started one.
   const activeCycle = useRef(0)
+  // Auto-reconnect bookkeeping: a pending retry timer, how many consecutive
+  // retries we've made, and whether the last teardown was the user's choice
+  // (in which case we must not reconnect).
+  const autoReconnectTimer = useRef<number | null>(null)
+  const autoReconnectAttempts = useRef(0)
+  const userDisconnected = useRef(false)
   const [connectionState, setConnectionState] =
     useState<ConnectionState>('offline')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -322,6 +334,7 @@ export function useRemoteSession(): RemoteSessionState {
 
   function releaseResources(): void {
     isConnecting.current = false
+    cancelAutoReconnect()
     stopPing()
     clearVideoProfileTimer()
     controlChannel.current?.close()
@@ -377,6 +390,37 @@ export function useRemoteSession(): RemoteSessionState {
     setCanRetry(issue.retryable)
   }
 
+  function cancelAutoReconnect(): void {
+    if (autoReconnectTimer.current !== null) {
+      window.clearTimeout(autoReconnectTimer.current)
+      autoReconnectTimer.current = null
+    }
+  }
+
+  /**
+   * Schedule one auto-reconnect after an unexpected drop. No-op when the user
+   * closed the session, when a retry is already pending (so the WebRTC-failed and
+   * socket-close events for the same drop count once), or once the attempt budget
+   * is spent (the error stays visible for a manual retry).
+   */
+  function scheduleAutoReconnect(): void {
+    if (
+      userDisconnected.current ||
+      autoReconnectTimer.current !== null ||
+      autoReconnectAttempts.current >= AUTO_RECONNECT_MAX_ATTEMPTS
+    ) {
+      return
+    }
+    autoReconnectAttempts.current += 1
+    autoReconnectTimer.current = window.setTimeout(() => {
+      autoReconnectTimer.current = null
+      if (userDisconnected.current || stateRef.current !== 'offline') {
+        return
+      }
+      connectInternal(true)
+    }, AUTO_RECONNECT_DELAY_MS)
+  }
+
   function teardownForCycle(cycle: number): void {
     // Nothing to tear down once offline; also makes a stale handler firing after
     // teardown a no-op.
@@ -416,6 +460,10 @@ export function useRemoteSession(): RemoteSessionState {
   }
 
   function disconnect(): void {
+    // A user-initiated close must never trigger auto-reconnect.
+    userDisconnected.current = true
+    autoReconnectAttempts.current = 0
+    cancelAutoReconnect()
     // Cancel a production ticket fetch that has not yet opened a socket: bump the
     // cycle so the pending requestSessionConfig().then sees it was superseded.
     if (isConnecting.current) {
@@ -491,6 +539,14 @@ export function useRemoteSession(): RemoteSessionState {
     // schema cap; oversized chunks are truncated rather than dropped.
     if (text.length > 0) {
       emitControl('text.input', { text: text.slice(0, 256) })
+    }
+  }
+
+  function setRemoteClipboard(text: string): void {
+    // Write the host clipboard so the user can Ctrl+V typed/pasted text on the
+    // home PC. Mirrors CLIPBOARD_TEXT_MAX_LENGTH in the protocol schema.
+    if (text.length > 0) {
+      emitControl('clipboard.set', { text: text.slice(0, 16_384) })
     }
   }
 
@@ -918,9 +974,13 @@ export function useRemoteSession(): RemoteSessionState {
       updateActiveState()
     })
     peer.addEventListener('connectionstatechange', () => {
-      if (peer.connectionState === 'failed') {
+      if (peer.connectionState === 'connected') {
+        // A healthy connection clears the retry budget for the next drop.
+        autoReconnectAttempts.current = 0
+      } else if (peer.connectionState === 'failed') {
         applyConnectionIssue('WEBRTC_FAILED')
         teardownForCycle(cycle)
+        scheduleAutoReconnect()
       }
     })
 
@@ -1013,13 +1073,20 @@ export function useRemoteSession(): RemoteSessionState {
     }
   }
 
-  function connect(): void {
+  function connectInternal(isAuto: boolean): void {
     // Guard on stateRef (synchronous source of truth) rather than the React
     // connectionState closure, which can be stale between a disconnect and the
     // next render and let a second connect start mid-teardown. isConnecting
     // additionally blocks re-entry while a production ticket fetch is in flight.
     if (isConnecting.current || stateRef.current !== 'offline') {
       return
+    }
+    // A fresh user-driven connect re-arms auto-reconnect and its budget; an
+    // automatic retry keeps counting toward the cap.
+    userDisconnected.current = false
+    if (!isAuto) {
+      autoReconnectAttempts.current = 0
+      cancelAutoReconnect()
     }
 
     setErrorMessage(null)
@@ -1093,25 +1160,32 @@ export function useRemoteSession(): RemoteSessionState {
         return
       }
 
+      // Parse/validation failures must NOT tear down an established session: an
+      // unrecognized or malformed signaling frame (e.g. a newer field arriving
+      // during a rolling deploy / cache skew, or a stray non-JSON frame) is
+      // ignored rather than treated as fatal. Only a genuine failure while
+      // *processing* a valid message (WebRTC negotiation) tears down. The control
+      // DataChannel has its own independent validation, so ignoring here is safe.
+      let parsed: unknown
       try {
-        const validation = validateSignalingMessage(JSON.parse(event.data))
-        if (!validation.ok) {
-          throw new Error('Invalid signaling message')
-        }
-        if (
-          validation.value.type === 'error' ||
-          validation.value.type === 'session.reject'
-        ) {
-          receivedServerIssue = true
-        }
-        void handleSignalingMessage(validation.value, cycle).catch(() => {
-          setErrorMessage('WebRTC 협상 메시지를 처리하지 못했습니다.')
-          teardownForCycle(cycle)
-        })
+        parsed = JSON.parse(event.data)
       } catch {
-        setErrorMessage('잘못된 시그널링 메시지를 받았습니다.')
-        teardownForCycle(cycle)
+        return
       }
+      const validation = validateSignalingMessage(parsed)
+      if (!validation.ok) {
+        return
+      }
+      if (
+        validation.value.type === 'error' ||
+        validation.value.type === 'session.reject'
+      ) {
+        receivedServerIssue = true
+      }
+      void handleSignalingMessage(validation.value, cycle).catch(() => {
+        setErrorMessage('WebRTC 협상 메시지를 처리하지 못했습니다.')
+        teardownForCycle(cycle)
+      })
     })
     socket.addEventListener('error', () => {
       if (cycle !== activeCycle.current) {
@@ -1123,6 +1197,9 @@ export function useRemoteSession(): RemoteSessionState {
     })
     socket.addEventListener('close', () => {
       teardownForCycle(cycle)
+      // A signaling socket that closes on its own (network blip, Worker redeploy)
+      // self-heals; a user-driven close set userDisconnected so this is a no-op.
+      scheduleAutoReconnect()
     })
   }
 
@@ -1170,7 +1247,7 @@ export function useRemoteSession(): RemoteSessionState {
     canConnect: isProduction.current === true || config.current !== null,
     canRetry,
     clipboardEntries,
-    connect,
+    connect: () => connectInternal(false),
     connectionState,
     controlGranted,
     controlLocked,
@@ -1197,6 +1274,7 @@ export function useRemoteSession(): RemoteSessionState {
     setVideoProfile: changeVideoProfile,
     sendKey,
     sendText,
+    setRemoteClipboard,
     sendPointerButton,
     sendPointerMove,
     sendPointerWheel,

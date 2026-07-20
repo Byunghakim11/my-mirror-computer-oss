@@ -1,12 +1,14 @@
-"""Windows clipboard text reader for the one-way clipboard share (M2 follow-up).
+"""Windows clipboard text bridge for the clipboard share (M2 follow-up).
 
-Reads CF_UNICODETEXT via the Win32 API. Text only — no file lists, images, or
-other formats leave the host. Returns None off Windows or when the clipboard is
+Reads and writes CF_UNICODETEXT via the Win32 API. Text only — no file lists,
+images, or other formats. Reads return None off Windows or when the clipboard is
 unavailable/held by another app so callers can simply skip that poll.
 
-The agent only ever READS the host clipboard; it never writes it. The viewer
-stages received text and copies to its own clipboard only on an explicit user
-click (see ADR-017).
+read_clipboard_text mirrors the host clipboard to the viewer (agent -> viewer,
+ADR-017). write_clipboard_text is the reverse: the viewer asks the agent to set
+the host clipboard so the user can Ctrl+V text they typed/pasted in the browser.
+Writes only happen when clipboard sharing is enabled and control is active
+(enforced by the caller). Neither path is ever logged with its content.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import sys
 from ctypes import wintypes
 
 CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
 # Keep in sync with CLIPBOARD_TEXT_MAX_LENGTH in packages/protocol control schema.
 CLIPBOARD_TEXT_MAX_LENGTH = 16_384
 
@@ -29,8 +32,16 @@ def _configure(user32: ctypes.WinDLL, kernel32: ctypes.WinDLL) -> None:
     user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
     user32.GetClipboardData.argtypes = (wintypes.UINT,)
     user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.EmptyClipboard.argtypes = ()
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    user32.SetClipboardData.restype = wintypes.HANDLE
     user32.CloseClipboard.argtypes = ()
     user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
     kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
     kernel32.GlobalLock.restype = wintypes.LPVOID
     kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
@@ -72,3 +83,58 @@ def read_clipboard_text() -> str | None:
     if not text:
         return None
     return text[:CLIPBOARD_TEXT_MAX_LENGTH]
+
+
+def write_clipboard_text(text: str) -> bool:
+    """Set the host clipboard to ``text`` (capped). Returns True on success.
+
+    Never raises: any Win32 failure (clipboard locked, allocation failure)
+    returns False so the caller can log a masked failure and move on. On success
+    the system takes ownership of the moveable global block, so we must NOT free
+    it; on failure we free it ourselves to avoid a leak.
+    """
+    if sys.platform != "win32":
+        return False
+    if not text:
+        return False
+    text = text[:CLIPBOARD_TEXT_MAX_LENGTH]
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _configure(user32, kernel32)
+
+        # UTF-16LE, NUL-terminated, as CF_UNICODETEXT expects.
+        buffer = ctypes.create_unicode_buffer(text)
+        size = ctypes.sizeof(buffer)
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
+        if not handle:
+            return False
+        # Single ownership flag: the system takes the block only once
+        # SetClipboardData succeeds. Until then any exit — including an exception
+        # from memmove/OpenClipboard/SetClipboardData — must free it, so the
+        # free lives in one finally rather than scattered per branch.
+        transferred = False
+        try:
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                return False
+            try:
+                ctypes.memmove(pointer, buffer, size)
+            finally:
+                kernel32.GlobalUnlock(handle)
+
+            if not user32.OpenClipboard(None):
+                return False
+            try:
+                user32.EmptyClipboard()
+                if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                    return False
+                transferred = True
+            finally:
+                user32.CloseClipboard()
+        finally:
+            if not transferred:
+                kernel32.GlobalFree(handle)
+    except Exception:  # noqa: BLE001 - clipboard access is best-effort
+        return False
+    return True

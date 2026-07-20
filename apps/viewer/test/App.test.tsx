@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
     sendPointerMove: vi.fn(),
     sendPointerWheel: vi.fn(),
     sendText: vi.fn(),
+    setRemoteClipboard: vi.fn(),
     setVideoProfile: vi.fn(),
     videoProfile: 'balanced' as const,
     videoProfileError: null as string | null,
@@ -126,5 +127,95 @@ describe('App viewer controls', () => {
     render(<App />)
 
     expect((screen.getByTestId('keyboard-button') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('offers a high video profile option and requests it on selection', () => {
+    render(<App />)
+
+    const select = screen.getByTestId('video-profile-select') as HTMLSelectElement
+    const options = Array.from(select.options).map((option) => option.value)
+    expect(options).toContain('high')
+
+    fireEvent.change(select, { target: { value: 'high' } })
+
+    expect(mocks.session.setVideoProfile).toHaveBeenCalledWith('high')
+  })
+
+  it('sends the Hangul/English IME toggle key when control is active', () => {
+    mocks.session.isControlActive = true
+
+    render(<App />)
+    fireEvent.click(screen.getByTestId('hangul-toggle-button'))
+
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(1, 'Lang1', 'down')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(2, 'Lang1', 'up')
+    expect(mocks.session.sendKey).toHaveBeenCalledTimes(2)
+  })
+
+  it('sends the Win+Shift+S capture chord in down/reverse-up order when control is active', () => {
+    mocks.session.isControlActive = true
+
+    render(<App />)
+    fireEvent.click(screen.getByTestId('capture-button'))
+
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(1, 'MetaLeft', 'down')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(2, 'ShiftLeft', 'down')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(3, 'KeyS', 'down')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(4, 'KeyS', 'up')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(5, 'ShiftLeft', 'up')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(6, 'MetaLeft', 'up')
+    expect(mocks.session.sendKey).toHaveBeenCalledTimes(6)
+  })
+
+  it('disables the Hangul toggle and capture buttons until control is active', () => {
+    mocks.session.isControlActive = false
+
+    render(<App />)
+
+    expect((screen.getByTestId('hangul-toggle-button') as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+    expect((screen.getByTestId('capture-button') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('writes the remote clipboard and sends a Ctrl+V chord from the clipboard panel', () => {
+    mocks.session.mediaStream = {} as MediaStream
+    mocks.session.isControlActive = true
+
+    render(<App />)
+    expect(screen.queryByTestId('remote-clipboard-input')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('clipboard-button'))
+    fireEvent.change(screen.getByTestId('remote-clipboard-input'), {
+      target: { value: '회사에서 복사한 텍스트' },
+    })
+    fireEvent.click(screen.getByTestId('remote-clipboard-paste'))
+
+    expect(mocks.session.setRemoteClipboard).toHaveBeenCalledWith('회사에서 복사한 텍스트')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(1, 'ControlLeft', 'down')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(2, 'KeyV', 'down')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(3, 'KeyV', 'up')
+    expect(mocks.session.sendKey).toHaveBeenNthCalledWith(4, 'ControlLeft', 'up')
+    expect(mocks.session.sendKey).toHaveBeenCalledTimes(4)
+  })
+
+  it('keeps the clipboard paste action disabled until text is entered', () => {
+    mocks.session.mediaStream = {} as MediaStream
+    mocks.session.isControlActive = true
+
+    render(<App />)
+    fireEvent.click(screen.getByTestId('clipboard-button'))
+
+    expect((screen.getByTestId('remote-clipboard-paste') as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+  })
+
+  it('disables the clipboard button until control is active', () => {
+    mocks.session.isControlActive = false
+
+    render(<App />)
+
+    expect((screen.getByTestId('clipboard-button') as HTMLButtonElement).disabled).toBe(true)
   })
 })

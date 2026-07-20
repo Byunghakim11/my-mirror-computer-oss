@@ -28,6 +28,10 @@ from aiortc.mediastreams import MediaStreamTrack
 
 LOGGER = logging.getLogger("mirror_host_agent.video")
 
+# Minimum seconds between Desktop Duplication rebuild attempts after a capture
+# fault, so a persistent fault does not rebuild dxcam on every frame.
+_RECOVER_RETRY_SECONDS = 1.0
+
 VIDEO_CLOCK_RATE = 90_000
 VIDEO_TIME_BASE = Fraction(1, VIDEO_CLOCK_RATE)
 
@@ -47,9 +51,15 @@ class VideoProfile:
 
 PROFILE_LOW = VideoProfile(name="low", width=960, height=540, fps=10)
 PROFILE_BALANCED = VideoProfile(name="balanced", width=1280, height=720, fps=15)
+# 1600x1000 is 16:10, matching a 1920x1200 desktop exactly, so
+# compute_letterbox_fit produces no pillarbox bars (every pixel is a live
+# control target) — unlike the 16:9 profiles above, which letterbox a 16:10
+# desktop and leave dead zones on the sides.
+PROFILE_HIGH = VideoProfile(name="high", width=1600, height=1000, fps=20)
 PROFILES: dict[str, VideoProfile] = {
     PROFILE_LOW.name: PROFILE_LOW,
     PROFILE_BALANCED.name: PROFILE_BALANCED,
+    PROFILE_HIGH.name: PROFILE_HIGH,
 }
 DEFAULT_PROFILE = PROFILE_BALANCED
 
@@ -254,6 +264,7 @@ class DesktopDuplicationTrack(MediaStreamTrack):
         self._camera = None
         self._last_rgb: np.ndarray | None = None
         self._restart_count = 0
+        self._recover_not_before = 0.0
 
     @property
     def restart_count(self) -> int:
@@ -312,15 +323,32 @@ class DesktopDuplicationTrack(MediaStreamTrack):
             camera.release()
         except Exception:  # noqa: BLE001 - best-effort teardown
             pass
+        # dxcam caches one instance per (device, output) in a module-level
+        # factory; release() frees the duplicator but leaves that registration,
+        # so the next dxcam.create() returns the same dead instance ("already
+        # exists; delete the old one first") and capture never recovers — the
+        # black-screen loop. clean_up() clears the factory so create() rebuilds.
+        try:
+            import dxcam
+
+            dxcam.clean_up()
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            pass
 
     def _grab_rgb(self) -> np.ndarray | None:
         """Blocking capture read; runs in an executor thread."""
+        # After a failed recovery, hold off before rebuilding the camera so a
+        # persistent fault (monitor asleep, display change) doesn't rebuild dxcam
+        # every frame; keep emitting the last/black frame meanwhile.
+        if self._camera is None and time.monotonic() < self._recover_not_before:
+            return self._last_rgb
         try:
             self._ensure_camera()
             assert self._camera is not None
             frame = self._camera.get_latest_frame()
         except Exception as error:  # noqa: BLE001 - convert to safety-net recovery
             self._recover(error)
+            self._recover_not_before = time.monotonic() + _RECOVER_RETRY_SECONDS
             return self._last_rgb
         if frame is None:
             return self._last_rgb

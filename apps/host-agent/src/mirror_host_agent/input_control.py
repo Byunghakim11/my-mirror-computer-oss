@@ -23,12 +23,12 @@ _EDGE_EPSILON = 1e-9
 
 # Mirrors the keyboard whitelist in packages/protocol/src/schemas/control.ts.
 # Second line of defense: the schema validates on the wire, the controller
-# re-checks before any injection. No Meta/Win key (system UI) by design.
+# re-checks before any injection.
 _KEY_CODE_RE = re.compile(
     r"^(?:Key[A-Z]|Digit[0-9]|Arrow(?:Up|Down|Left|Right)"
     r"|F(?:[1-9]|1[0-2])|Backspace|Tab|Enter|Escape|Space|Delete"
     r"|Home|End|PageUp|PageDown|Shift(?:Left|Right)"
-    r"|Control(?:Left|Right)|Alt(?:Left|Right)"
+    r"|Control(?:Left|Right)|Alt(?:Left|Right)|Meta(?:Left|Right)"
     r"|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon"
     r"|Quote|Backquote|Comma|Period|Slash|Lang[12])$"
 )
