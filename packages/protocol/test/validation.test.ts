@@ -139,6 +139,32 @@ describe('control message validation', () => {
     expect(result.ok).toBe(false)
   })
 
+  it('accepts a clipboard.image message naming the uploaded file', () => {
+    const result = validateControlMessage({
+      data: { name: 'clipboard-1783152000000.png' },
+      event: 'clipboard.image',
+      sequence: 9,
+      sessionId: SESSION_ID,
+      timestamp: 1_783_152_000_000,
+      version: 1,
+    })
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('rejects a clipboard.image message with an empty name', () => {
+    const result = validateControlMessage({
+      data: { name: '' },
+      event: 'clipboard.image',
+      sequence: 10,
+      sessionId: SESSION_ID,
+      timestamp: 1_783_152_000_000,
+      version: 1,
+    })
+
+    expect(result.ok).toBe(false)
+  })
+
   it('accepts mobile soft-keyboard text input', () => {
     const result = validateControlMessage({
       data: { text: '안녕하세요 hello' },

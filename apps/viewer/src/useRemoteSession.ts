@@ -51,6 +51,7 @@ interface FileUpload {
   onAccept: (() => void) | null
   onDone: (() => void) | null
   onFail: ((code: string) => void) | null
+  savedAs: string | null
   readonly transferId: string
 }
 
@@ -99,6 +100,9 @@ const AUTO_RECONNECT_DELAY_MS = 2_000
 // Preferred receive codec order: H.264 first (hardware-friendly, matches the
 // agent's preference), VP8 as fallback, everything else after.
 const PREFERRED_VIDEO_CODECS = ['video/h264', 'video/vp8']
+// Cap for company->home clipboard images. Comfortably fits a high-res screenshot
+// PNG while bounding the transfer; the agent decodes/copies it on the host.
+const CLIPBOARD_IMAGE_MAX_BYTES = 32 * 1024 * 1024
 
 function applyPreferredVideoCodecs(transceiver: RTCRtpTransceiver): void {
   if (typeof RTCRtpReceiver === 'undefined') {
@@ -144,6 +148,7 @@ interface RemoteSessionState {
   readonly fileTransfer: FileTransferState | null
   readonly canSendFiles: boolean
   readonly sendFile: (file: File) => void
+  readonly sendClipboardImage: (file: File) => void
   readonly clearFileTransfer: () => void
   readonly downloadableFiles: readonly CatalogEntry[]
   readonly requestFileList: () => void
@@ -628,6 +633,7 @@ export function useRemoteSession(): RemoteSessionState {
     if (message.event === 'file.accept') {
       upload.onAccept?.()
     } else if (message.event === 'file.done') {
+      upload.savedAs = message.data.savedAs
       upload.onDone?.()
     } else if (message.event === 'file.error') {
       upload.onFail?.(message.data.code)
@@ -766,6 +772,7 @@ export function useRemoteSession(): RemoteSessionState {
       onAccept: null,
       onDone: null,
       onFail: null,
+      savedAs: null,
       transferId: newTransferId(),
     }
     fileUpload.current = upload
@@ -780,6 +787,50 @@ export function useRemoteSession(): RemoteSessionState {
         fileUpload.current = null
       }
     })
+  }
+
+  // Company PC -> home PC clipboard image: upload the pasted image over the file
+  // channel (into Incoming), then tell the agent to copy that saved file onto
+  // the host clipboard (clipboard.image). The agent deletes the file afterwards.
+  function sendClipboardImage(file: File): void {
+    if (fileUpload.current || fileChannel.current?.readyState !== 'open') {
+      return
+    }
+    if (file.size > CLIPBOARD_IMAGE_MAX_BYTES) {
+      setFileTransfer({
+        errorCode: 'TOO_LARGE',
+        fileName: file.name,
+        progress: 0,
+        status: 'error',
+      })
+      return
+    }
+    const upload: FileUpload = {
+      cancelled: false,
+      onAccept: null,
+      onDone: null,
+      onFail: null,
+      savedAs: null,
+      transferId: newTransferId(),
+    }
+    fileUpload.current = upload
+    setFileTransfer({
+      errorCode: null,
+      fileName: file.name,
+      progress: 0,
+      status: 'preparing',
+    })
+    void runUpload(file, upload)
+      .then(() => {
+        if (upload.savedAs) {
+          emitControl('clipboard.image', { name: upload.savedAs })
+        }
+      })
+      .finally(() => {
+        if (fileUpload.current === upload) {
+          fileUpload.current = null
+        }
+      })
   }
 
   function awaitSignal(
@@ -1258,6 +1309,7 @@ export function useRemoteSession(): RemoteSessionState {
     fileTransfer,
     canSendFiles,
     sendFile,
+    sendClipboardImage,
     clearFileTransfer,
     downloadableFiles,
     requestFileList,

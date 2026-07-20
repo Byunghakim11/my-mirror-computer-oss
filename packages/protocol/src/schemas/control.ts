@@ -19,6 +19,7 @@ export const CONTROL_EVENTS = [
   'session.pong',
   'clipboard.text',
   'clipboard.set',
+  'clipboard.image',
 ] as const
 
 // clipboard.text is agent -> viewer (host clipboard mirrored to the viewer, per
@@ -141,6 +142,17 @@ export const ControlMessageSchema = Type.Union(
       'clipboard.set',
       Type.Object(
         { text: Type.String({ maxLength: CLIPBOARD_TEXT_MAX_LENGTH, minLength: 1 }) },
+        messageOptions,
+      ),
+    ),
+    // Image bytes travel over the file-v1 channel into the host Incoming folder;
+    // this event (sent after the upload finishes) names that saved file so the
+    // agent copies it onto the host clipboard and then deletes it. name is a
+    // bare filename — the agent additionally rejects any path separators.
+    createEnvelope(
+      'clipboard.image',
+      Type.Object(
+        { name: Type.String({ maxLength: 255, minLength: 1 }) },
         messageOptions,
       ),
     ),

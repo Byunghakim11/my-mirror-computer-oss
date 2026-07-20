@@ -14,11 +14,24 @@ Writes only happen when clipboard sharing is enabled and control is active
 from __future__ import annotations
 
 import ctypes
+import os
+import subprocess
 import sys
 from ctypes import wintypes
 
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+# CREATE_NO_WINDOW: keep the helper PowerShell from flashing a console window.
+_CREATE_NO_WINDOW = 0x0800_0000
+# copy=$true flushes the image onto the clipboard so it survives the helper
+# process exiting. The path arrives via an env var (below), never interpolated
+# into the command, so a hostile filename cannot inject PowerShell.
+_SET_IMAGE_PS = (
+    "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+    "$img = [System.Drawing.Image]::FromFile($env:MIRROR_CLIPBOARD_IMAGE_PATH); "
+    "try { [System.Windows.Forms.Clipboard]::SetDataObject($img, $true) } "
+    "finally { $img.Dispose() }"
+)
 # Keep in sync with CLIPBOARD_TEXT_MAX_LENGTH in packages/protocol control schema.
 CLIPBOARD_TEXT_MAX_LENGTH = 16_384
 
@@ -138,3 +151,33 @@ def write_clipboard_text(text: str) -> bool:
     except Exception:  # noqa: BLE001 - clipboard access is best-effort
         return False
     return True
+
+
+def write_clipboard_image_from_file(path: str) -> bool:
+    """Copy an image file onto the host clipboard. Returns True on success.
+
+    Windows clipboard image APIs need an STA thread and a decoder, so this shells
+    out to PowerShell (-STA) with System.Drawing/Windows.Forms rather than
+    hand-rolling CF_DIB. Never raises: any failure (timeout, decode error,
+    non-Windows) returns False so the caller can log a masked failure.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, path via env
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-Command",
+                _SET_IMAGE_PS,
+            ],
+            env={**os.environ, "MIRROR_CLIPBOARD_IMAGE_PATH": str(path)},
+            capture_output=True,
+            timeout=15,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except Exception:  # noqa: BLE001 - clipboard access is best-effort
+        return False
+    return result.returncode == 0

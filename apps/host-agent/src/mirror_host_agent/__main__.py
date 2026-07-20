@@ -651,6 +651,9 @@ class M0Agent:
         if message["event"] == "clipboard.set":
             self._handle_clipboard_set(message["data"])
             return
+        if message["event"] == "clipboard.image":
+            self._handle_clipboard_image(message["data"])
+            return
         source = getattr(self._video_track, "source_size", None)
         if source is not None:
             controller.set_source_size(source[0], source[1])
@@ -687,6 +690,69 @@ class M0Agent:
             "ok" if ok else "failed",
             len(payload),
         )
+
+    def _handle_clipboard_image(self, data: dict[str, Any]) -> None:
+        """Copy a just-uploaded image (host Incoming folder) onto the clipboard.
+
+        The viewer sends this on the control channel after the file-v1 upload
+        finishes, naming the saved file. Requires both the clipboard and file
+        opt-ins; the file is deleted after the copy since it exists only to reach
+        the clipboard. Never logs the name or content.
+        """
+        if not (self._clipboard_enabled and self._files_enabled) or self._files_dir is None:
+            return
+        name = data.get("name")
+        if not isinstance(name, str) or not name:
+            return
+        # Bare filename only. Reject separators/traversal AND the NTFS colon
+        # stream syntax (ADS): a name like "file.xlsm:Zone.Identifier" stays
+        # inside Incoming yet would let a caller strip the Mark-of-the-Web tag off
+        # an uploaded file (ADR-014). A legitimate savedAs never contains these.
+        if (
+            name in (".", "..")
+            or name != Path(name).name
+            or ":" in name
+            or "\\" in name
+            or "/" in name
+        ):
+            return
+        now = time.monotonic()
+        last = self._last_clipboard_set_monotonic
+        if last is not None and now - last < CLIPBOARD_SET_MIN_INTERVAL_SECONDS:
+            return
+        self._last_clipboard_set_monotonic = now
+
+        incoming = self._files_dir / "Incoming"
+        try:
+            resolved = (incoming / name).resolve()
+            if resolved.parent != incoming.resolve() or not resolved.is_file():
+                return
+        except OSError:
+            return
+
+        # The clipboard write shells out to PowerShell (up to 15s), so run it off
+        # the event loop — a slow/malformed image must not freeze video, input, or
+        # the control watchdog. No Ctrl+V follows an image, so ordering is moot.
+        # Falls back to a synchronous call when no loop is running (unit tests).
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.run_in_executor(None, self._copy_image_file_to_clipboard, resolved)
+        else:
+            self._copy_image_file_to_clipboard(resolved)
+
+    def _copy_image_file_to_clipboard(self, path: Path) -> None:
+        """Blocking clipboard image write + cleanup (runs in a worker thread)."""
+        from .windows_clipboard import write_clipboard_image_from_file
+
+        ok = write_clipboard_image_from_file(str(path))
+        LOGGER.info("Clipboard image set from viewer: %s", "ok" if ok else "failed")
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
     def _parse_control(self, raw_control: Any) -> dict[str, Any] | None:
         if not isinstance(raw_control, str) or len(raw_control.encode()) > MAX_CONTROL_BYTES:

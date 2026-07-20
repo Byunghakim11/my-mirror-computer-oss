@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
     releaseRemoteInput: vi.fn(),
     roundTripTimeMs: null,
     sendFile: vi.fn(),
+    sendClipboardImage: vi.fn(),
     sendKey: vi.fn(),
     sendPointerButton: vi.fn(),
     sendPointerMove: vi.fn(),
@@ -197,6 +198,36 @@ describe('App viewer controls', () => {
     expect(mocks.session.sendKey).toHaveBeenNthCalledWith(3, 'KeyV', 'up')
     expect(mocks.session.sendKey).toHaveBeenNthCalledWith(4, 'ControlLeft', 'up')
     expect(mocks.session.sendKey).toHaveBeenCalledTimes(4)
+  })
+
+  it('sends a pasted image to the home PC clipboard from the panel', () => {
+    mocks.session.mediaStream = {} as MediaStream
+    mocks.session.isControlActive = true
+
+    render(<App />)
+    fireEvent.click(screen.getByTestId('clipboard-button'))
+
+    const file = new File([new Uint8Array([1, 2, 3])], 'x.png', { type: 'image/png' })
+    fireEvent.paste(screen.getByTestId('remote-clipboard-input'), {
+      clipboardData: { items: [{ type: 'image/png', getAsFile: () => file }] },
+    })
+
+    expect(mocks.session.sendClipboardImage).toHaveBeenCalledTimes(1)
+    expect(mocks.session.setRemoteClipboard).not.toHaveBeenCalled()
+  })
+
+  it('does not treat a plain-text paste as an image', () => {
+    mocks.session.mediaStream = {} as MediaStream
+    mocks.session.isControlActive = true
+
+    render(<App />)
+    fireEvent.click(screen.getByTestId('clipboard-button'))
+
+    fireEvent.paste(screen.getByTestId('remote-clipboard-input'), {
+      clipboardData: { items: [{ type: 'text/plain', getAsFile: () => null }] },
+    })
+
+    expect(mocks.session.sendClipboardImage).not.toHaveBeenCalled()
   })
 
   it('keeps the clipboard paste action disabled until text is entered', () => {

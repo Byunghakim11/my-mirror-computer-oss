@@ -572,6 +572,7 @@ export function App() {
         {clipboardPanelOpen && session.isControlActive && (
           <RemoteClipboard
             onClose={() => setClipboardPanelOpen(false)}
+            sendClipboardImage={session.sendClipboardImage}
             sendKey={session.sendKey}
             setRemoteClipboard={session.setRemoteClipboard}
           />

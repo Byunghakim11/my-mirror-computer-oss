@@ -568,6 +568,74 @@ class ClipboardTests(unittest.TestCase):
             agent._handle_clipboard_set({"text": "second-ok"})
         self.assertEqual(writer.call_count, 2)
 
+    def _image_agent(self, tmp_dir: str, clipboard_enabled: bool = True) -> M0Agent:
+        return M0Agent(
+            AgentConfig(
+                device_id="device_0123456789abcdef",
+                heartbeat_stop_after_seconds=None,
+                session_id="session_0123456789abcdef",
+                ticket="not-used",
+                ws_url="ws://127.0.0.1:8787/ws",
+                clipboard_enabled=clipboard_enabled,
+                files_enabled=True,
+                files_dir=tmp_dir,
+            )
+        )
+
+    def test_clipboard_image_copies_saved_file_then_deletes_it(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            incoming = Path(tmp) / "Incoming"
+            incoming.mkdir()
+            image = incoming / "clipboard-1.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n fake")
+            agent = self._image_agent(tmp)
+            with patch(
+                "mirror_host_agent.windows_clipboard.write_clipboard_image_from_file",
+                return_value=True,
+            ) as writer:
+                agent._handle_clipboard_image({"name": "clipboard-1.png"})
+            writer.assert_called_once_with(str(image.resolve()))
+            self.assertFalse(image.exists())
+
+    def test_clipboard_image_rejects_path_separators_and_traversal(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Incoming").mkdir()
+            secret = Path(tmp) / "secret.png"
+            secret.write_bytes(b"x")
+            agent = self._image_agent(tmp)
+            with patch(
+                "mirror_host_agent.windows_clipboard.write_clipboard_image_from_file"
+            ) as writer:
+                agent._handle_clipboard_image({"name": "../secret.png"})
+                agent._handle_clipboard_image({"name": "sub/evil.png"})
+                agent._handle_clipboard_image({"name": "sub\\evil.png"})
+                agent._handle_clipboard_image({"name": ".."})
+                # NTFS Alternate Data Stream: would strip Mark-of-the-Web (ADR-014).
+                agent._handle_clipboard_image({"name": "uploaded.xlsm:Zone.Identifier"})
+            writer.assert_not_called()
+            self.assertTrue(secret.exists())
+
+    def test_clipboard_image_is_noop_when_clipboard_disabled(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            incoming = Path(tmp) / "Incoming"
+            incoming.mkdir()
+            (incoming / "a.png").write_bytes(b"x")
+            agent = self._image_agent(tmp, clipboard_enabled=False)
+            with patch(
+                "mirror_host_agent.windows_clipboard.write_clipboard_image_from_file"
+            ) as writer:
+                agent._handle_clipboard_image({"name": "a.png"})
+            writer.assert_not_called()
+
 
 class SessionAdoptionTests(unittest.IsolatedAsyncioTestCase):
     """Option A (ADR-018): the always-on agent adopts the viewer's session."""
