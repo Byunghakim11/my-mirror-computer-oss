@@ -371,15 +371,8 @@ class M0Agent:
                 and sys.platform == "win32"
             )
             if can_control:
-                try:
-                    from .windows_input import create_input_sink
-
-                    self._pending_input_sink = create_input_sink()
-                except Exception as error:  # noqa: BLE001 - fail closed
-                    LOGGER.warning(
-                        "Control backend preflight failed (%s); granting view only",
-                        type(error).__name__,
-                    )
+                self._pending_input_sink = self._create_input_sink()
+                if self._pending_input_sink is None:
                     can_control = False
             self._granted_control = can_control
             now_ms = int(time.time() * 1000)
@@ -603,14 +596,47 @@ class M0Agent:
             new_profile.fps,
         )
 
+    def _create_input_sink(self) -> InputSink | None:
+        """Create the OS input-injection backend, or None if unavailable.
+
+        Wraps the Windows preflight so both the session.request grant and a
+        later (re)start can obtain a sink through one fail-closed path.
+        """
+        if sys.platform != "win32":
+            return None
+        try:
+            from .windows_input import create_input_sink
+
+            return create_input_sink()
+        except Exception as error:  # noqa: BLE001 - fail closed
+            LOGGER.warning(
+                "Control backend preflight failed (%s); granting view only",
+                type(error).__name__,
+            )
+            return None
+
     def _start_control(self) -> None:
         """Create the injection sink + controller for a granted control session.
         Falls back to view-only if injection is unavailable."""
+        if not self._granted_control:
+            return
+        if self._input_controller is not None:
+            # Control is already active (e.g. a renegotiation reused the grant).
+            # The sink/controller inject OS input and are peer-independent, so
+            # keep the running one rather than tearing it down and racing.
+            return
         sink = self._pending_input_sink
         self._pending_input_sink = None
         if sink is None:
+            # Granted, but the pre-prepared sink was already consumed by an
+            # earlier peer/negotiation — the intermittent "keyboard/mouse stops
+            # working after a reconnect" bug. Re-create it on demand instead of
+            # silently degrading to view-only.
+            sink = self._create_input_sink()
+        if sink is None:
             LOGGER.warning("Control backend was not prepared; staying view-only")
             self._revoke_control()
+            self._queue_policy_update()
             return
         self._input_controller = InputController(
             sink,

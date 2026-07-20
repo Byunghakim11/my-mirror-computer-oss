@@ -170,6 +170,53 @@ class ControlGrantTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(agent._granted_control)
 
+    def _control_agent(self) -> M0Agent:
+        return M0Agent(
+            AgentConfig(
+                device_id="device_0123456789abcdef",
+                heartbeat_stop_after_seconds=None,
+                session_id="session_0123456789abcdef",
+                ticket="not-used",
+                ws_url="ws://127.0.0.1:8787/ws",
+                control_enabled=True,
+            )
+        )
+
+    async def test_start_control_recreates_sink_after_reconnect(self) -> None:
+        # Regression: the intermittent "keyboard/mouse stops working after a
+        # reconnect". The grant persists but the one-shot pre-prepared sink was
+        # already consumed by the previous peer, so _pending_input_sink is None.
+        # _start_control must re-create it rather than dropping to view-only.
+        agent = self._control_agent()
+        agent._granted_control = True
+        agent._control_expires_at_ms = int(time.time() * 1000) + 60_000
+        agent._pending_input_sink = None  # consumed by the previous peer
+        with patch.object(agent, "_create_input_sink", return_value=FakeInputSink()):
+            agent._start_control()
+        try:
+            self.assertIsNotNone(agent._input_controller)
+            self.assertTrue(agent._granted_control)
+        finally:
+            agent._stop_control_runtime()
+
+    async def test_start_control_is_idempotent(self) -> None:
+        # A second _start_control (duplicate negotiation) must not create a
+        # second controller or re-create the sink.
+        agent = self._control_agent()
+        agent._granted_control = True
+        agent._control_expires_at_ms = int(time.time() * 1000) + 60_000
+        with patch.object(
+            agent, "_create_input_sink", return_value=FakeInputSink()
+        ) as create:
+            agent._start_control()
+            first = agent._input_controller
+            agent._start_control()
+        try:
+            self.assertIs(agent._input_controller, first)
+            self.assertEqual(create.call_count, 1)
+        finally:
+            agent._stop_control_runtime()
+
     async def test_expired_control_grant_releases_input_and_notifies_viewer(self) -> None:
         agent = M0Agent(
             AgentConfig(
