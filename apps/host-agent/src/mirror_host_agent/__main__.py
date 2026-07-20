@@ -1326,6 +1326,10 @@ def _open_files_folder(agent: "M0Agent") -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    # Lower the software H.264 encoder's CPU/memory before any frame is encoded.
+    from .encoder_tuning import apply_h264_preset
+
+    apply_h264_preset()
     try:
         asyncio.run(run_agent())
     except KeyboardInterrupt:

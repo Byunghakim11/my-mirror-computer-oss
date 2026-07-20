@@ -83,6 +83,24 @@ class LetterboxRgbTests(unittest.TestCase):
         self.assertLess(int(center[1]), 60)
         self.assertLess(int(center[2]), 60)
 
+    def test_matching_aspect_fills_without_black_bars(self) -> None:
+        # 16:10 source into a 16:10 canvas: the fast path returns the scaled image
+        # directly (no zeros canvas), so there are no black bars anywhere.
+        source = np.full((1200, 1920, 3), 200, dtype=np.uint8)
+        out = letterbox_rgb(source, 1280, 800)
+        self.assertEqual(out.shape, (800, 1280, 3))
+        self.assertGreater(int(out[0, 0, 0]), 100)
+        self.assertGreater(int(out[799, 1279, 0]), 100)
+
+    def test_handles_non_contiguous_source(self) -> None:
+        # A channel-reversed view is non-contiguous (negative stride); the
+        # contiguity fast path is skipped and it must still scale correctly.
+        base = np.full((100, 200, 3), 180, dtype=np.uint8)
+        view = base[:, :, ::-1]
+        self.assertFalse(view.flags["C_CONTIGUOUS"])
+        out = letterbox_rgb(view, 1280, 720)
+        self.assertEqual(out.shape, (720, 1280, 3))
+
     def test_rejects_non_rgb_input(self) -> None:
         with self.assertRaises(ValueError):
             letterbox_rgb(np.zeros((10, 10), dtype=np.uint8))
@@ -107,6 +125,13 @@ class VideoProfileTests(unittest.TestCase):
         self.assertEqual(high.name, "high")
         # The factory must accept the new profile like any other.
         track = create_video_track("desktop", high)
+        self.assertIsInstance(track, DesktopDuplicationTrack)
+
+    def test_smooth_profile_is_1280x800_30fps(self) -> None:
+        smooth = get_profile("smooth")
+        self.assertEqual((smooth.width, smooth.height, smooth.fps), (1280, 800, 30))
+        self.assertEqual(smooth.name, "smooth")
+        track = create_video_track("desktop", smooth)
         self.assertIsInstance(track, DesktopDuplicationTrack)
 
     def test_synthetic_track_honors_profile_size(self) -> None:

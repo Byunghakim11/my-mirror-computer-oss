@@ -56,10 +56,15 @@ PROFILE_BALANCED = VideoProfile(name="balanced", width=1280, height=720, fps=15)
 # control target) — unlike the 16:9 profiles above, which letterbox a 16:10
 # desktop and leave dead zones on the sides.
 PROFILE_HIGH = VideoProfile(name="high", width=1600, height=1000, fps=20)
+# 1280x800 is 16:10 (matches a 1920x1200 desktop, so no pillarbox dead zones) at
+# 30fps for smooth motion. Fewer pixels than High, so with the faster encoder
+# preset it is lighter on CPU than High@20 while feeling noticeably smoother.
+PROFILE_SMOOTH = VideoProfile(name="smooth", width=1280, height=800, fps=30)
 PROFILES: dict[str, VideoProfile] = {
     PROFILE_LOW.name: PROFILE_LOW,
     PROFILE_BALANCED.name: PROFILE_BALANCED,
     PROFILE_HIGH.name: PROFILE_HIGH,
+    PROFILE_SMOOTH.name: PROFILE_SMOOTH,
 }
 DEFAULT_PROFILE = PROFILE_BALANCED
 
@@ -127,11 +132,22 @@ def letterbox_rgb(
     src_height, src_width = image_rgb.shape[0], image_rgb.shape[1]
     fit = compute_letterbox_fit(src_width, src_height, dst_width, dst_height)
 
-    contiguous = np.ascontiguousarray(image_rgb, dtype=np.uint8)
+    # Avoid a full-frame copy when the source is already a contiguous uint8 RGB
+    # buffer (dxcam's output is): np.ascontiguousarray would copy needlessly.
+    if image_rgb.dtype == np.uint8 and image_rgb.flags["C_CONTIGUOUS"]:
+        contiguous = image_rgb
+    else:
+        contiguous = np.ascontiguousarray(image_rgb, dtype=np.uint8)
     source_frame = av.VideoFrame.from_ndarray(contiguous, format="rgb24")
     scaled = source_frame.reformat(width=fit.width, height=fit.height).to_ndarray(
         format="rgb24"
     )
+
+    # No letterbox bars needed (source aspect matches the canvas — e.g. a 16:10
+    # desktop into a 16:10 profile): the scaled image already fills the canvas,
+    # so return it directly and skip allocating + copying into a zeros canvas.
+    if fit.width == dst_width and fit.height == dst_height:
+        return scaled
 
     canvas = np.zeros((dst_height, dst_width, 3), dtype=np.uint8)
     canvas[

@@ -267,7 +267,7 @@ export function App() {
               disabled={session.videoProfilePending}
               onChange={(event) =>
                 session.setVideoProfile(
-                  event.target.value as 'low' | 'balanced' | 'high',
+                  event.target.value as 'low' | 'balanced' | 'high' | 'smooth',
                 )
               }
               value={session.videoProfile}
@@ -275,6 +275,7 @@ export function App() {
               <option value="low">Low · 540p/10fps</option>
               <option value="balanced">Balanced · 720p/15fps</option>
               <option value="high">High · 1600×1000/20fps</option>
+              <option value="smooth">Smooth · 1280×800/30fps</option>
             </select>
           </label>
           {session.videoProfilePending && (

@@ -53,6 +53,10 @@ const VideoProfileSchema = Type.Union([
   // the encoded frame has no letterbox bars and every on-screen pixel is a live
   // control target (ADR: higher tier + dead-zone removal).
   Type.Literal('high'),
+  // Smooth is 16:10 (1280x800) at 30fps: fewer pixels than High but a higher
+  // frame rate for fluid motion, and — with the faster encoder preset — lighter
+  // on CPU than High@20.
+  Type.Literal('smooth'),
 ])
 
 export const SignalingMessageSchema = Type.Union(

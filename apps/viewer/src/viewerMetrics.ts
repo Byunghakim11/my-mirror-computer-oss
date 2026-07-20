@@ -1,5 +1,5 @@
 export type DisplayMode = 'fit' | 'actual'
-export type VideoProfile = 'low' | 'balanced' | 'high'
+export type VideoProfile = 'low' | 'balanced' | 'high' | 'smooth'
 export type QualityTone = 'neutral' | 'good' | 'fair' | 'poor'
 
 export interface ConnectionQuality {
