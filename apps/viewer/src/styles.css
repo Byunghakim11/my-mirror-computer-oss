@@ -616,6 +616,33 @@ h1 {
   border-radius: 0.7rem;
 }
 
+/* Drag & drop file transfer (drop a file on the video → home PC Incoming) */
+.viewer-stage[data-drag-over='true'] {
+  outline: 3px dashed rgba(56, 189, 248, 0.9);
+  outline-offset: -6px;
+}
+
+.file-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.file-drop-overlay span {
+  padding: 0.9rem 1.4rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(56, 189, 248, 0.7);
+  background: rgba(15, 23, 42, 0.9);
+  color: #e0f2fe;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
 /* Clipboard surface (company PC -> home PC): type or paste, then Ctrl+V remote */
 .remote-clipboard {
   position: absolute;

@@ -102,6 +102,7 @@ export function App() {
   const [presentationError, setPresentationError] = useState<string | null>(null)
   const [keyboardOpen, setKeyboardOpen] = useState(false)
   const [clipboardPanelOpen, setClipboardPanelOpen] = useState(false)
+  const [isFileDragOver, setIsFileDragOver] = useState(false)
   const [downloadPanelOpen, setDownloadPanelOpen] = useState(false)
   const [toolbarHidden, setToolbarHidden] = useState(false)
   const [copiedClipboardId, setCopiedClipboardId] = useState<number | null>(null)
@@ -237,9 +238,50 @@ export function App() {
         aria-label="원격 화면"
         data-control-active={session.isControlActive}
         data-display-mode={displayMode}
+        data-drag-over={isFileDragOver}
         data-testid="viewer-stage"
+        onDragOver={(event) => {
+          // Only offer a drop target for files, and only while a transfer is
+          // possible. preventDefault marks this element as a valid drop zone.
+          if (!session.canSendFiles || !event.dataTransfer.types.includes('Files')) {
+            return
+          }
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+          if (!isFileDragOver) {
+            setIsFileDragOver(true)
+          }
+        }}
+        onDragLeave={(event) => {
+          // Ignore leaves into descendants; only clear when leaving the stage.
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setIsFileDragOver(false)
+          }
+        }}
+        onDrop={(event) => {
+          event.preventDefault()
+          setIsFileDragOver(false)
+          if (!session.canSendFiles) {
+            return
+          }
+          const files = event.dataTransfer.files
+          const file = files.item(0)
+          if (!file) {
+            return
+          }
+          setPresentationError(null)
+          session.sendFile(file)
+          if (files.length > 1) {
+            setPresentationError('파일은 한 번에 하나씩 전송됩니다 — 첫 번째 파일을 보냅니다.')
+          }
+        }}
         ref={viewerStage}
       >
+        {isFileDragOver && (
+          <div className="file-drop-overlay" data-testid="file-drop-overlay">
+            <span>여기에 놓으면 집 PC로 전송</span>
+          </div>
+        )}
         {toolbarHidden && (
           <button
             aria-label="메뉴 표시"

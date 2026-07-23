@@ -117,6 +117,11 @@ class M0Agent:
         self._control_enabled = config.control_enabled
         self._emergency_locked = False
         self._connected = False
+        # Last time the signaling connection was confirmed healthy (connect,
+        # heartbeat send, or message received). The watchdog restarts the agent
+        # if this goes stale — catching wedged/half-open sockets that never
+        # raise. Seeded at construction so startup has a full window to connect.
+        self._last_healthy_monotonic = time.monotonic()
         self._status_listener: Callable[[str], None] | None = None
         self._sequence = 0
         self._peer: RTCPeerConnection | None = None
@@ -271,6 +276,7 @@ class M0Agent:
         ) as websocket:
             self._websocket = websocket
             self._connected = True
+            self._mark_signaling_healthy()
             self._notify_status("online")
             LOGGER.info("M0 agent connected to local signaling")
             await websocket.send(
@@ -289,6 +295,7 @@ class M0Agent:
 
             try:
                 async for raw_message in websocket:
+                    self._mark_signaling_healthy()
                     await self._handle_message(websocket, raw_message)
             finally:
                 if self._heartbeat_task:
@@ -312,6 +319,18 @@ class M0Agent:
             await websocket.send(
                 json.dumps(self._message("agent.heartbeat", {}))
             )
+            # A successful heartbeat send means the loop is alive and the socket
+            # is writable — the watchdog's "still healthy" signal.
+            self._mark_signaling_healthy()
+
+    def _mark_signaling_healthy(self) -> None:
+        self._last_healthy_monotonic = time.monotonic()
+
+    def seconds_since_healthy(self) -> float:
+        """How long since the signaling connection was last confirmed healthy.
+
+        Read by the watchdog thread (must stay cheap and never raise)."""
+        return time.monotonic() - self._last_healthy_monotonic
 
     async def _handle_message(self, websocket: Any, raw_message: Any) -> None:
         if not isinstance(raw_message, str) or len(raw_message.encode()) > MAX_SIGNALING_BYTES:
@@ -1229,8 +1248,10 @@ async def run_agent() -> None:
     )
     emergency_stop_monitor: Any = None
     tray_controller: Any = None
+    signaling_watchdog: Any = None
     if sys.platform == "win32":
         from . import keep_awake
+        from .signaling_watchdog import SignalingWatchdog
         from .windows_emergency_stop import WindowsEmergencyStopMonitor
         from .tray import TrayController
 
@@ -1280,6 +1301,16 @@ async def run_agent() -> None:
             agent.set_status_listener(on_status_change)
             tray_controller.start()
             LOGGER.warning("Tray ready; Ctrl+Alt+F12 locks remote control")
+            # Self-heal a wedged signaling connection by relaunching the
+            # scheduled task. Opt-in (set in run-agent.ps1) since the restart
+            # path assumes the agent runs under the MirrorHostAgent task.
+            if os.environ.get("MIRROR_WATCHDOG_ENABLED", "0") == "1":
+                signaling_watchdog = SignalingWatchdog(
+                    seconds_since_healthy=agent.seconds_since_healthy,
+                    on_stale=_restart_on_signaling_stale,
+                )
+                signaling_watchdog.start()
+                LOGGER.info("Signaling watchdog armed")
         except Exception as error:  # noqa: BLE001 - fail closed if local safety UI fails
             LOGGER.error("Local safety UI unavailable; control disabled: %s", error)
             if emergency_stop_monitor is not None:
@@ -1292,6 +1323,8 @@ async def run_agent() -> None:
     except asyncio.CancelledError:
         LOGGER.info("M0 agent shutdown requested")
     finally:
+        if signaling_watchdog is not None:
+            signaling_watchdog.stop()
         if emergency_stop_monitor is not None:
             emergency_stop_monitor.stop()
         if tray_controller is not None:
@@ -1309,34 +1342,48 @@ def _quit_agent(agent_task: "asyncio.Task[None] | None") -> None:
         agent_task.cancel()
 
 
+def _spawn_relaunch_helper() -> None:
+    """Spawn a detached helper that ends and re-runs the Windows Scheduled Task
+    `MirrorHostAgent`, replacing this process with a fresh instance.
+
+    `schtasks /End` terminates this process, so callers do not need to (and the
+    watchdog must not) rely on the asyncio loop still running. Waiting on THIS
+    PID before `/Run` prevents a slow teardown from overlapping a fresh
+    instance. The only interpolated value is our own PID (an int) — no
+    shell-injection surface."""
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    pid = os.getpid()
+    command = (
+        "schtasks /End /TN MirrorHostAgent; "
+        f"Wait-Process -Id {pid} -Timeout 15 -ErrorAction SilentlyContinue; "
+        "schtasks /Run /TN MirrorHostAgent"
+    )
+    subprocess.Popen(  # noqa: S603 - fixed argv, no shell, no external input
+        ["powershell", "-NoProfile", "-Command", command],
+        creationflags=creationflags,
+        close_fds=True,
+    )
+    LOGGER.info("Relaunch helper spawned")
+
+
 def _restart_agent(agent_task: "asyncio.Task[None] | None") -> None:
-    """Best-effort restart: the agent normally runs under the Windows
-    Scheduled Task `MirrorHostAgent`. Spawn a detached helper that ends and
-    re-runs that task, then cleanly shut down this process so the task
-    scheduler starts a fresh instance."""
+    """Tray-initiated restart: relaunch the scheduled task, then cleanly cancel
+    the running loop so this process exits promptly."""
     try:
-        creationflags = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        )
-        # End the task, then WAIT for THIS process to actually exit before /Run,
-        # so a slow graceful teardown (peer close, tray join) can never overlap a
-        # fresh instance. The only interpolated value is our own PID (an int from
-        # os.getpid()), never external input — no shell-injection surface.
-        pid = os.getpid()
-        command = (
-            "schtasks /End /TN MirrorHostAgent; "
-            f"Wait-Process -Id {pid} -Timeout 15 -ErrorAction SilentlyContinue; "
-            "schtasks /Run /TN MirrorHostAgent"
-        )
-        subprocess.Popen(  # noqa: S603 - fixed argv, no shell, no external input
-            ["powershell", "-NoProfile", "-Command", command],
-            creationflags=creationflags,
-            close_fds=True,
-        )
-        LOGGER.info("Restart requested; relaunch helper spawned")
+        _spawn_relaunch_helper()
     except Exception as error:  # noqa: BLE001 - best-effort
         LOGGER.warning("Could not spawn restart helper: %s", type(error).__name__)
     _quit_agent(agent_task)
+
+
+def _restart_on_signaling_stale() -> None:
+    """Watchdog-initiated restart (runs on the watchdog THREAD, not the loop):
+    relaunch via the scheduled task. `schtasks /End` kills this (possibly
+    wedged/frozen) process, so we must not touch the asyncio loop here."""
+    try:
+        _spawn_relaunch_helper()
+    except Exception as error:  # noqa: BLE001 - best-effort
+        LOGGER.warning("Watchdog could not spawn relaunch: %s", type(error).__name__)
 
 
 def _open_files_folder(agent: "M0Agent") -> None:

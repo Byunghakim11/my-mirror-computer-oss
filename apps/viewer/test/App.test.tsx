@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     mediaStream: null as MediaStream | null,
     releaseRemoteInput: vi.fn(),
     roundTripTimeMs: null,
+    canSendFiles: false,
     sendFile: vi.fn(),
     sendClipboardImage: vi.fn(),
     sendKey: vi.fn(),
@@ -54,6 +55,7 @@ afterEach(() => {
   mocks.session.canRetry = false
   mocks.session.isControlActive = false
   mocks.session.mediaStream = null
+  mocks.session.canSendFiles = false
   mocks.session.videoProfilePending = false
   mocks.session.videoProfileError = null
 })
@@ -248,5 +250,47 @@ describe('App viewer controls', () => {
     render(<App />)
 
     expect((screen.getByTestId('clipboard-button') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('highlights the stage while a file is dragged over it', () => {
+    mocks.session.mediaStream = {} as MediaStream
+    mocks.session.canSendFiles = true
+
+    render(<App />)
+    const stage = screen.getByTestId('viewer-stage')
+    fireEvent.dragOver(stage, { dataTransfer: { types: ['Files'], dropEffect: '' } })
+
+    expect(stage.dataset.dragOver).toBe('true')
+    expect(screen.getByTestId('file-drop-overlay')).toBeTruthy()
+  })
+
+  it('sends a file dropped onto the viewer stage', () => {
+    mocks.session.mediaStream = {} as MediaStream
+    mocks.session.canSendFiles = true
+
+    render(<App />)
+    const stage = screen.getByTestId('viewer-stage')
+    const file = new File(['hello'], 'note.txt', { type: 'text/plain' })
+    const files = {
+      length: 1,
+      item: (index: number) => (index === 0 ? file : null),
+    } as unknown as FileList
+    fireEvent.drop(stage, { dataTransfer: { files, types: ['Files'] } })
+
+    expect(mocks.session.sendFile).toHaveBeenCalledTimes(1)
+    expect(mocks.session.sendFile).toHaveBeenCalledWith(file)
+  })
+
+  it('ignores a drop when the file channel is not ready', () => {
+    mocks.session.mediaStream = {} as MediaStream
+    mocks.session.canSendFiles = false
+
+    render(<App />)
+    const stage = screen.getByTestId('viewer-stage')
+    const file = new File(['x'], 'x.txt')
+    const files = { length: 1, item: () => file } as unknown as FileList
+    fireEvent.drop(stage, { dataTransfer: { files, types: ['Files'] } })
+
+    expect(mocks.session.sendFile).not.toHaveBeenCalled()
   })
 })
