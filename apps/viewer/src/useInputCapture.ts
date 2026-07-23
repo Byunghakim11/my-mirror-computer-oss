@@ -17,6 +17,15 @@ export interface InputSenders {
 const KEY_CODE_PATTERN =
   /^(?:Key[A-Z]|Digit[0-9]|Arrow(?:Up|Down|Left|Right)|F(?:[1-9]|1[0-2])|Backspace|Tab|Enter|Escape|Space|Delete|Home|End|PageUp|PageDown|Shift(?:Left|Right)|Control(?:Left|Right)|Alt(?:Left|Right)|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Backquote|Comma|Period|Slash|Lang[12])$/u
 
+// Korean keyboards put the 한/영 toggle on the right-Alt position, and browsers
+// report that physical key as AltRight (its `key` varies: HangulMode/Process/
+// Alt). Remap it to Lang1 (VK_HANGUL) so pressing 한/영 on the local keyboard
+// toggles the REMOTE IME directly — no toolbar button needed. Left Alt stays the
+// remote Alt modifier, so no Alt+shortcut is lost.
+function remapKeyCode(code: string): string {
+  return code === 'AltRight' ? 'Lang1' : code
+}
+
 const DOM_BUTTON: Record<number, PointerButton> = {
   0: 'left',
   1: 'middle',
@@ -200,23 +209,25 @@ export function useInputCapture(
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      const code = remapKeyCode(event.code)
       if (
         event.repeat ||
         isInteractiveTarget(event.target) ||
-        !KEY_CODE_PATTERN.test(event.code)
+        !KEY_CODE_PATTERN.test(code)
       ) {
         return
       }
       event.preventDefault()
-      sendersRef.current.sendKey(event.code, 'down')
+      sendersRef.current.sendKey(code, 'down')
     }
 
     const handleKeyUp = (event: KeyboardEvent) => {
-      if (isInteractiveTarget(event.target) || !KEY_CODE_PATTERN.test(event.code)) {
+      const code = remapKeyCode(event.code)
+      if (isInteractiveTarget(event.target) || !KEY_CODE_PATTERN.test(code)) {
         return
       }
       event.preventDefault()
-      sendersRef.current.sendKey(event.code, 'up')
+      sendersRef.current.sendKey(code, 'up')
     }
 
     const releaseAll = () => {

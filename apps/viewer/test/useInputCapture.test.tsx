@@ -88,6 +88,28 @@ describe('useInputCapture keyboard forwarding', () => {
     expect(senders.sendKey).not.toHaveBeenCalled()
   })
 
+  it('remaps right Alt (한/영 position) to the remote IME toggle Lang1', () => {
+    const ref = { current: createVideo() }
+    renderHook(() => useInputCapture(ref, true, senders))
+
+    window.dispatchEvent(makeEvent('keydown', { code: 'AltRight', repeat: false }))
+    window.dispatchEvent(makeEvent('keyup', { code: 'AltRight' }))
+
+    expect(senders.sendKey).toHaveBeenNthCalledWith(1, 'Lang1', 'down')
+    expect(senders.sendKey).toHaveBeenNthCalledWith(2, 'Lang1', 'up')
+  })
+
+  it('keeps left Alt as the plain remote Alt modifier', () => {
+    const ref = { current: createVideo() }
+    renderHook(() => useInputCapture(ref, true, senders))
+
+    window.dispatchEvent(makeEvent('keydown', { code: 'AltLeft', repeat: false }))
+    window.dispatchEvent(makeEvent('keyup', { code: 'AltLeft' }))
+
+    expect(senders.sendKey).toHaveBeenNthCalledWith(1, 'AltLeft', 'down')
+    expect(senders.sendKey).toHaveBeenNthCalledWith(2, 'AltLeft', 'up')
+  })
+
   it('does not capture keys typed into an editable field', () => {
     const ref = { current: createVideo() }
     renderHook(() => useInputCapture(ref, true, senders))
