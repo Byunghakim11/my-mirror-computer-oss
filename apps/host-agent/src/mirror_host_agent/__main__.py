@@ -986,10 +986,15 @@ class M0Agent:
     async def _run_download(self, path: Path, transfer_id: Any) -> None:
         """Stream one Outgoing file to the viewer as raw binary chunks, framed by
         a download-offer (size up front) and a download-complete (sha256 after).
-        The hash is computed in the same single pass that streams the bytes."""
+        The hash is computed in the same single pass that streams the bytes.
+
+        File I/O runs in a worker thread so a large/slow file never blocks the
+        event loop (video encode, input, signaling)."""
         channel = self._file_channel
+        loop = asyncio.get_running_loop()
         try:
-            size = path.stat().st_size
+            stat_result = await loop.run_in_executor(None, path.stat)
+            size = stat_result.st_size
         except OSError:
             self._send_file(
                 "file.error", {"code": "NOT_FOUND", "transferId": transfer_id}
@@ -1001,25 +1006,27 @@ class M0Agent:
             {"name": path.name, "size": size, "transferId": transfer_id},
         )
         digest = hashlib.sha256()
+        handle = await loop.run_in_executor(None, path.open, "rb")
         try:
-            with path.open("rb") as handle:
-                while True:
-                    if (
-                        channel is None
-                        or channel.readyState != "open"
-                        or self._download_transfer_id != transfer_id
-                    ):
-                        return  # cancelled / channel gone
-                    chunk = handle.read(FILE_DOWNLOAD_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    while channel.bufferedAmount > FILE_DOWNLOAD_HIGH_WATER_BYTES:
-                        await asyncio.sleep(0.02)
-                        if channel.readyState != "open":
-                            return
-                    channel.send(chunk)
-                    await asyncio.sleep(0)
+            while True:
+                if (
+                    channel is None
+                    or channel.readyState != "open"
+                    or self._download_transfer_id != transfer_id
+                ):
+                    return  # cancelled / channel gone
+                chunk = await loop.run_in_executor(
+                    None, handle.read, FILE_DOWNLOAD_CHUNK_BYTES
+                )
+                if not chunk:
+                    break
+                digest.update(chunk)
+                while channel.bufferedAmount > FILE_DOWNLOAD_HIGH_WATER_BYTES:
+                    await asyncio.sleep(0.02)
+                    if channel.readyState != "open":
+                        return
+                channel.send(chunk)
+                await asyncio.sleep(0)
         except asyncio.CancelledError:
             raise
         except OSError:
@@ -1028,6 +1035,8 @@ class M0Agent:
             )
             self._download_transfer_id = None
             return
+        finally:
+            await loop.run_in_executor(None, handle.close)
         self._send_file(
             "file.download-complete",
             {"sha256": digest.hexdigest(), "transferId": transfer_id},
@@ -1104,18 +1113,25 @@ class M0Agent:
 
     async def _run_clipboard_monitor(self) -> None:
         """Poll the host clipboard and forward NEW text to the viewer over the
-        control channel. Text-only, size-capped, and never written back."""
+        control channel. Text-only, size-capped, and never written back.
+
+        The Win32 clipboard APIs block for 10-100ms per call, so every read
+        runs in a worker thread to keep the event loop (video encode, input)
+        responsive."""
         from .windows_clipboard import read_clipboard_text
 
+        loop = asyncio.get_running_loop()
         # Seed with the current contents so only copies made after the viewer
         # connected are forwarded.
-        self._last_clipboard_text = read_clipboard_text()
+        self._last_clipboard_text = await loop.run_in_executor(
+            None, read_clipboard_text
+        )
         while True:
             await asyncio.sleep(CLIPBOARD_POLL_INTERVAL_SECONDS)
             channel = self._control_channel
             if channel is None:
                 return
-            text = read_clipboard_text()
+            text = await loop.run_in_executor(None, read_clipboard_text)
             if text is None or text == self._last_clipboard_text:
                 continue
             self._last_clipboard_text = text
@@ -1377,13 +1393,22 @@ def _restart_agent(agent_task: "asyncio.Task[None] | None") -> None:
 
 
 def _restart_on_signaling_stale() -> None:
-    """Watchdog-initiated restart (runs on the watchdog THREAD, not the loop):
-    relaunch via the scheduled task. `schtasks /End` kills this (possibly
-    wedged/frozen) process, so we must not touch the asyncio loop here."""
+    """Watchdog-initiated restart (runs on the watchdog THREAD, not the loop).
+
+    Spawns the relaunch helper and then hard-exits THIS process. Exiting
+    ourselves is essential: `schtasks /End` does not reliably reap the python
+    child, and a surviving old instance would fight the new one over the
+    single-session room — the runaway-CPU / restart-loop failure mode. os._exit
+    skips atexit/flush handlers on purpose; the process may be wedged, and the
+    relaunch helper waits for our PID to disappear before starting the new one.
+    """
     try:
         _spawn_relaunch_helper()
     except Exception as error:  # noqa: BLE001 - best-effort
         LOGGER.warning("Watchdog could not spawn relaunch: %s", type(error).__name__)
+    LOGGER.warning("Watchdog exiting this instance for a clean relaunch")
+    logging.shutdown()
+    os._exit(1)
 
 
 def _open_files_folder(agent: "M0Agent") -> None:
@@ -1397,8 +1422,44 @@ def _open_files_folder(agent: "M0Agent") -> None:
         LOGGER.warning("Could not open files folder: %s", type(error).__name__)
 
 
+def _configure_logging() -> None:
+    """Log to stderr AND a rotating file the agent owns.
+
+    The launcher's shell redirect can silently stop capturing output (a stale
+    handle, a different session), which previously left us with no log at all
+    while the agent misbehaved. Owning the file here guarantees diagnosable logs.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        log_path = Path(
+            os.environ.get("MIRROR_LOG_FILE", str(Path.home() / "mirror-agent-app.log"))
+        )
+        handlers.append(
+            RotatingFileHandler(
+                log_path, maxBytes=2_000_000, backupCount=2, encoding="utf-8"
+            )
+        )
+    except Exception:  # noqa: BLE001 - never let logging setup stop the agent
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+    )
+
+
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    _configure_logging()
+    # Only one agent may run: concurrent instances evict each other from the
+    # single-session room and burn CPU (see single_instance).
+    from .single_instance import acquire
+
+    instance_guard = acquire()
+    if instance_guard is None:
+        LOGGER.warning("Another agent instance is already running; exiting")
+        return
     # Lower the software H.264 encoder's CPU/memory before any frame is encoded.
     from .encoder_tuning import apply_h264_preset
 
