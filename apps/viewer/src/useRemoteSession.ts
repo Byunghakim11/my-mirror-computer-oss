@@ -21,7 +21,7 @@ import {
   readDevelopmentConfig,
 } from './developmentConfig'
 import { isProductionHost, requestSessionConfig } from './productionSession'
-import type { VideoProfile } from './viewerMetrics'
+import type { VideoProfile, WebRTCStats } from './viewerMetrics'
 
 const ICE_GATHERING_TIMEOUT_MS = 10_000
 const MAX_CLIPBOARD_ENTRIES = 20
@@ -91,11 +91,35 @@ function newTransferId(): string {
   return `transfer_${encoded}`
 }
 const VIDEO_PROFILE_TIMEOUT_MS = 10_000
+
+// Adaptive quality: profile ladder (high → low), step-down after 3 bad polls
+// (6s), step-up after 5 good polls (10s), 10s cooldown between changes, and a
+// 30s grace period after a manual profile switch.
+const QUALITY_LADDER: readonly VideoProfile[] = ['smooth', 'high', 'balanced', 'low']
+const STATS_POLL_INTERVAL_MS = 2_000
+const STEP_DOWN_THRESHOLD_LOSS = 5 // percent
+const STEP_DOWN_THRESHOLD_RTT = 300 // ms
+const STEP_DOWN_CONSECUTIVE = 3
+const STEP_UP_THRESHOLD_LOSS = 1 // percent
+const STEP_UP_THRESHOLD_RTT = 100 // ms
+const STEP_UP_CONSECUTIVE = 5
+const QUALITY_CHANGE_COOLDOWN_MS = 10_000
+const MANUAL_CHANGE_GRACE_MS = 30_000
 // Self-heal an unexpected drop (WebRTC failed / signaling closed) without making
 // the user click "reconnect". Bounded so a genuinely dead path stops retrying and
 // surfaces the error; the counter resets once a connection reaches 'connected'.
-const AUTO_RECONNECT_MAX_ATTEMPTS = 5
+// The budget covers a few minutes: a home-PC agent restart alone takes ~20s, and
+// giving up after the old 5 attempts (~10s) is what made brief blips look like
+// "it disconnects constantly". The delay backs off so a long outage does not
+// hammer the signaling Worker.
+const AUTO_RECONNECT_MAX_ATTEMPTS = 40
 const AUTO_RECONNECT_DELAY_MS = 2_000
+const AUTO_RECONNECT_MAX_DELAY_MS = 15_000
+
+// Attempt 1 waits the base delay, later attempts back off linearly up to the cap.
+function autoReconnectDelay(attempt: number): number {
+  return Math.min(AUTO_RECONNECT_DELAY_MS * attempt, AUTO_RECONNECT_MAX_DELAY_MS)
+}
 
 // Preferred receive codec order: H.264 first (hardware-friendly, matches the
 // agent's preference), VP8 as fallback, everything else after.
@@ -169,6 +193,9 @@ interface RemoteSessionState {
   readonly videoProfile: VideoProfile
   readonly videoProfileError: string | null
   readonly videoProfilePending: boolean
+  readonly webrtcStats: WebRTCStats
+  readonly autoQualityEnabled: boolean
+  readonly toggleAutoQuality: () => void
 }
 
 function waitForIceGathering(
@@ -263,6 +290,20 @@ export function useRemoteSession(): RemoteSessionState {
   >([])
   const [fileDownloadState, setFileDownloadState] =
     useState<FileDownloadState | null>(null)
+  const [webrtcStats, setWebrtcStats] = useState<WebRTCStats>({
+    bitrateKbps: null,
+    framesDropped: null,
+    packetLossPercent: null,
+  })
+  const [autoQualityEnabled, setAutoQualityEnabled] = useState(true)
+  // Adaptive-quality bookkeeping (refs to avoid re-render on every poll tick).
+  const lastBytesReceived = useRef<number | null>(null)
+  const lastStatsPollTime = useRef(0)
+  const badPollStreak = useRef(0)
+  const goodPollStreak = useRef(0)
+  const lastQualityChangeTime = useRef(0)
+  const lastManualProfileChange = useRef(0)
+  const autoQualityRef = useRef(true)
 
   if (isProduction.current === null) {
     isProduction.current = isProductionHost()
@@ -423,7 +464,7 @@ export function useRemoteSession(): RemoteSessionState {
         return
       }
       connectInternal(true)
-    }, AUTO_RECONNECT_DELAY_MS)
+    }, autoReconnectDelay(autoReconnectAttempts.current))
   }
 
   function teardownForCycle(cycle: number): void {
@@ -1258,6 +1299,7 @@ export function useRemoteSession(): RemoteSessionState {
     if (profile === videoProfile || videoProfilePending) {
       return
     }
+    lastManualProfileChange.current = Date.now()
     setVideoProfileError(null)
     const activeConfig = config.current
     const socket = webSocket.current
@@ -1285,6 +1327,110 @@ export function useRemoteSession(): RemoteSessionState {
       setVideoProfileError('화질 변경 확인이 지연되고 있습니다. 다시 선택해 주세요.')
     }, VIDEO_PROFILE_TIMEOUT_MS)
   }
+
+  function toggleAutoQuality(): void {
+    setAutoQualityEnabled((prev) => {
+      autoQualityRef.current = !prev
+      return !prev
+    })
+  }
+
+  // Poll RTCPeerConnection.getStats() for loss/bitrate and drive adaptive
+  // quality. Runs every STATS_POLL_INTERVAL_MS while a peer exists.
+  useEffect(() => {
+    const peer = peerConnection.current
+    if (!peer || typeof peer.getStats !== 'function') {
+      return
+    }
+    const timer = window.setInterval(async () => {
+      const p = peerConnection.current
+      if (!p) return
+      let stats: RTCStatsReport
+      try {
+        stats = await p.getStats()
+      } catch {
+        return
+      }
+      let packetsLost = 0
+      let packetsReceived = 0
+      let bytesReceived = 0
+      let framesDropped = 0
+      let rttMs: number | null = null
+      stats.forEach((report) => {
+        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          packetsLost = (report as any).packetsLost ?? 0
+          packetsReceived = (report as any).packetsReceived ?? 0
+          bytesReceived = (report as any).bytesReceived ?? 0
+          framesDropped = (report as any).framesDropped ?? 0
+        }
+        if (report.type === 'candidate-pair' && (report as any).state === 'succeeded') {
+          const rtt = (report as any).currentRoundTripTime
+          if (typeof rtt === 'number') rttMs = rtt * 1000
+        }
+      })
+      const total = packetsLost + packetsReceived
+      const lossPercent = total > 0 ? (packetsLost / total) * 100 : null
+      // Bitrate from delta of bytesReceived between polls.
+      const now = Date.now()
+      let bitrateKbps: number | null = null
+      if (lastBytesReceived.current !== null && lastStatsPollTime.current > 0) {
+        const dt = now - lastStatsPollTime.current
+        if (dt > 0) {
+          bitrateKbps = ((bytesReceived - lastBytesReceived.current) * 8) / dt
+        }
+      }
+      lastBytesReceived.current = bytesReceived
+      lastStatsPollTime.current = now
+      // Update RTT from WebRTC (more accurate than the ping-based estimate).
+      if (rttMs !== null) {
+        setRoundTripTimeMs(rttMs)
+      }
+      setWebrtcStats({ bitrateKbps, framesDropped, packetLossPercent: lossPercent })
+
+      // --- Adaptive quality ---
+      if (!autoQualityRef.current) return
+      const effectiveRtt = rttMs ?? roundTripTimeMs
+      const isBad =
+        (lossPercent !== null && lossPercent > STEP_DOWN_THRESHOLD_LOSS) ||
+        (effectiveRtt !== null && effectiveRtt > STEP_DOWN_THRESHOLD_RTT)
+      const isGood =
+        (lossPercent === null || lossPercent < STEP_UP_THRESHOLD_LOSS) &&
+        (effectiveRtt === null || effectiveRtt < STEP_UP_THRESHOLD_RTT)
+
+      if (isBad) {
+        badPollStreak.current += 1
+        goodPollStreak.current = 0
+      } else if (isGood) {
+        goodPollStreak.current += 1
+        badPollStreak.current = 0
+      } else {
+        badPollStreak.current = 0
+        goodPollStreak.current = 0
+      }
+
+      const cooldownOk = now - lastQualityChangeTime.current > QUALITY_CHANGE_COOLDOWN_MS
+      const manualGraceOk = now - lastManualProfileChange.current > MANUAL_CHANGE_GRACE_MS
+      if (!cooldownOk || !manualGraceOk || videoProfilePending) return
+
+      const currentIdx = QUALITY_LADDER.indexOf(videoProfile)
+      if (badPollStreak.current >= STEP_DOWN_CONSECUTIVE && currentIdx < QUALITY_LADDER.length - 1) {
+        const next = QUALITY_LADDER[currentIdx + 1]!
+        console.info(`[auto-quality] stepping down: ${videoProfile} → ${next} (loss=${lossPercent?.toFixed(1)}% rtt=${effectiveRtt?.toFixed(0)}ms)`)
+        lastQualityChangeTime.current = now
+        badPollStreak.current = 0
+        changeVideoProfile(next)
+      } else if (goodPollStreak.current >= STEP_UP_CONSECUTIVE && currentIdx > 0) {
+        const next = QUALITY_LADDER[currentIdx - 1]!
+        console.info(`[auto-quality] stepping up: ${videoProfile} → ${next} (loss=${lossPercent?.toFixed(1)}% rtt=${effectiveRtt?.toFixed(0)}ms)`)
+        lastQualityChangeTime.current = now
+        goodPollStreak.current = 0
+        changeVideoProfile(next)
+      }
+    }, STATS_POLL_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+    // Re-arm when the peer connection or video profile changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaStream, videoProfile, videoProfilePending])
 
   useEffect(() => {
     if (config.current) {
@@ -1333,5 +1479,8 @@ export function useRemoteSession(): RemoteSessionState {
     videoProfile,
     videoProfileError,
     videoProfilePending,
+    webrtcStats,
+    autoQualityEnabled,
+    toggleAutoQuality,
   }
 }

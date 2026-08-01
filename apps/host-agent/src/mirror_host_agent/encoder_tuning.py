@@ -48,6 +48,56 @@ def resolve_preset() -> str:
     return preset if preset in _VALID_PRESETS else _DEFAULT_PRESET
 
 
+def raise_bitrate_cap(
+    max_kbps: int | None = None, start_kbps: int | None = None
+) -> bool:
+    """Raise aiortc's H.264 bitrate ceiling so the picture can get sharp.
+
+    aiortc ships a 3 Mbps cap with a 1 Mbps start, tuned for camera video. Screen
+    content is mostly text and thin edges, which that budget renders mushy — the
+    main reason the remote desktop looks softer than a commercial client. The
+    values here are only a CEILING: WebRTC congestion control still probes and
+    settles on whatever the link actually sustains, so a slow network degrades
+    exactly as before instead of stalling.
+
+    Returns True if the caps were raised. Never raises.
+    """
+    ceiling = max_kbps if max_kbps is not None else _env_int(
+        "MIRROR_MAX_BITRATE_KBPS", 12_000
+    )
+    start = start_kbps if start_kbps is not None else _env_int(
+        "MIRROR_START_BITRATE_KBPS", 3_000
+    )
+    try:
+        from aiortc.codecs import h264 as _h264
+
+        # The target_bitrate setter clamps against these module attributes on
+        # every call, so patching them is enough — no encoder surgery needed.
+        _h264.MAX_BITRATE = max(ceiling, 1) * 1000
+        _h264.DEFAULT_BITRATE = min(max(start, 1) * 1000, _h264.MAX_BITRATE)
+        LOGGER.info(
+            "H.264 bitrate ceiling raised to %d kbps (start %d kbps)", ceiling, start
+        )
+        return True
+    except Exception as error:  # noqa: BLE001 - tuning is best-effort
+        LOGGER.warning(
+            "Could not raise bitrate cap (using aiortc defaults): %s",
+            type(error).__name__,
+        )
+        return False
+
+
+def _env_int(name: str, fallback: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
+
+
 def build_libx264_options(preset: str) -> dict[str, str]:
     """libx264 options: aiortc's zero-latency screen-share tuning plus a preset.
 

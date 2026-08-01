@@ -37,6 +37,42 @@ class BuildOptionsTests(unittest.TestCase):
         self.assertEqual(options.get("level"), "31")
 
 
+class BitrateCapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from aiortc.codecs import h264
+
+        self._original_max = h264.MAX_BITRATE
+        self._original_default = h264.DEFAULT_BITRATE
+
+    def tearDown(self) -> None:
+        from aiortc.codecs import h264
+
+        h264.MAX_BITRATE = self._original_max
+        h264.DEFAULT_BITRATE = self._original_default
+
+    def test_raises_ceiling_so_screen_text_can_get_sharp(self) -> None:
+        from aiortc.codecs import h264
+
+        self.assertTrue(encoder_tuning.raise_bitrate_cap(12_000, 3_000))
+        self.assertEqual(h264.MAX_BITRATE, 12_000_000)
+        self.assertEqual(h264.DEFAULT_BITRATE, 3_000_000)
+
+    def test_encoder_target_bitrate_can_now_exceed_the_old_3mbps_clamp(self) -> None:
+        from aiortc.codecs.h264 import H264Encoder
+
+        encoder_tuning.raise_bitrate_cap(12_000, 3_000)
+        encoder = H264Encoder()
+        encoder.target_bitrate = 9_000_000
+        self.assertEqual(encoder.target_bitrate, 9_000_000)
+
+    def test_start_never_exceeds_the_ceiling(self) -> None:
+        from aiortc.codecs import h264
+
+        encoder_tuning.raise_bitrate_cap(2_000, 9_000)
+        self.assertEqual(h264.MAX_BITRATE, 2_000_000)
+        self.assertEqual(h264.DEFAULT_BITRATE, 2_000_000)
+
+
 class ApplyPresetTests(unittest.TestCase):
     def test_patch_installs_and_encodes_without_error(self) -> None:
         from aiortc.codecs.h264 import H264Encoder

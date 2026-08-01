@@ -47,7 +47,22 @@ MAX_SIGNALING_BYTES = 256 * 1024
 MAX_CONTROL_BYTES = 72 * 1024
 DEFAULT_VIDEO_PROFILE = "balanced"
 CONTROL_WATCHDOG_INTERVAL_SECONDS = 1.0
-CONTROL_GRANT_TTL_MS = 60 * 60 * 1000
+def _control_ttl_minutes() -> int:
+    """Control-grant lifetime in minutes (MIRROR_CONTROL_TTL_MINUTES, default 2h).
+
+    The grant is the safety boundary for remote input, so it always expires; the
+    default is long enough for a full work session without re-requesting. The
+    tray toggle and Ctrl+Alt+F12 emergency lock revoke it immediately regardless.
+    """
+    raw = os.environ.get("MIRROR_CONTROL_TTL_MINUTES", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    return value if value > 0 else 120
+
+
+CONTROL_GRANT_TTL_MS = _control_ttl_minutes() * 60 * 1000
 CLIPBOARD_POLL_INTERVAL_SECONDS = 0.7
 # Minimum spacing between accepted viewer->host clipboard writes. One paste sends
 # a single clipboard.set, so this never affects normal use; it just bounds a
@@ -1460,10 +1475,13 @@ def main() -> None:
     if instance_guard is None:
         LOGGER.warning("Another agent instance is already running; exiting")
         return
-    # Lower the software H.264 encoder's CPU/memory before any frame is encoded.
-    from .encoder_tuning import apply_h264_preset
+    # Tune the software H.264 encoder before any frame is encoded: a faster
+    # preset (CPU/memory) and a higher bitrate ceiling (sharpness — aiortc's
+    # 3 Mbps camera-oriented cap is what makes screen text look soft).
+    from .encoder_tuning import apply_h264_preset, raise_bitrate_cap
 
     apply_h264_preset()
+    raise_bitrate_cap()
     try:
         asyncio.run(run_agent())
     except KeyboardInterrupt:
