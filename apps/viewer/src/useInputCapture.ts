@@ -101,6 +101,38 @@ export function useInputCapture(
       touchOrigin = null
     }
 
+    // Mice report 125-1000 events/sec, far more than the remote can inject.
+    // Sending each one queues them on the data channel, so the cursor lags
+    // further behind the longer you move — the "control feels slow" symptom.
+    // Coalescing per animation frame sends only the LATEST position (and the
+    // SUM of wheel deltas), which cuts traffic and keeps input current.
+    let pendingMove: { x: number; y: number } | null = null
+    let pendingWheelX = 0
+    let pendingWheelY = 0
+    let flushFrame: number | null = null
+
+    const flushPendingInput = () => {
+      flushFrame = null
+      if (pendingMove) {
+        sendersRef.current.sendPointerMove(pendingMove.x, pendingMove.y)
+        pendingMove = null
+      }
+      if (pendingWheelX !== 0 || pendingWheelY !== 0) {
+        sendersRef.current.sendPointerWheel(
+          clampWheel(pendingWheelX),
+          clampWheel(pendingWheelY),
+        )
+        pendingWheelX = 0
+        pendingWheelY = 0
+      }
+    }
+
+    const scheduleFlush = () => {
+      if (flushFrame === null) {
+        flushFrame = window.requestAnimationFrame(flushPendingInput)
+      }
+    }
+
     const handlePointerMove = (event: PointerEvent) => {
       if (event.pointerType === 'touch') {
         if (touchPhase === 'pending' && touchOrigin) {
@@ -126,7 +158,8 @@ export function useInputCapture(
       }
       const point = toNormalized(event.clientX, event.clientY)
       if (point) {
-        sendersRef.current.sendPointerMove(point.x, point.y)
+        pendingMove = point
+        scheduleFlush()
       }
     }
 
@@ -198,10 +231,11 @@ export function useInputCapture(
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault()
       // Browser deltaY>0 is scroll-down; Windows wheel positive is up -> negate.
-      sendersRef.current.sendPointerWheel(
-        clampWheel(event.deltaX),
-        clampWheel(-event.deltaY),
-      )
+      // Accumulate within the frame so a fast scroll becomes one larger delta
+      // instead of a burst the remote's rate limiter would drop (choppy scroll).
+      pendingWheelX += event.deltaX
+      pendingWheelY += -event.deltaY
+      scheduleFlush()
     }
 
     const handleContextMenu = (event: MouseEvent) => {
@@ -263,6 +297,14 @@ export function useInputCapture(
       window.removeEventListener('blur', releaseAll)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       resetTouchGesture()
+      // Drop any coalesced move/wheel so nothing is sent after control ends.
+      if (flushFrame !== null) {
+        window.cancelAnimationFrame(flushFrame)
+        flushFrame = null
+      }
+      pendingMove = null
+      pendingWheelX = 0
+      pendingWheelY = 0
       // Ensure nothing stays pressed when control ends.
       sendersRef.current.releaseRemoteInput()
     }

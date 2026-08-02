@@ -142,12 +142,69 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("union", _INPUT_UNION)]
 
 
+# Korean IME toggle via the IME window's conversion mode. Injecting VK_HANGUL
+# with SendInput is unreliable — many apps ignore a synthetic 한/영 key because
+# the real one carries a scan code the IME hotkey layer expects — so ask the IME
+# to switch modes directly instead. This is deterministic (read mode, flip the
+# native bit, write it back) rather than a toggle that can desync.
+WM_IME_CONTROL = 0x0283
+IMC_GETCONVERSIONMODE = 0x0001
+IMC_SETCONVERSIONMODE = 0x0002
+IME_CMODE_NATIVE = 0x0001  # Hangul input; cleared = alphanumeric
+
+
+def toggle_hangul_ime() -> bool:
+    """Flip the foreground window's IME between Hangul and English.
+
+    Returns True when the IME accepted the change; False when there is no IME
+    window (or any Win32 failure), so the caller can fall back to SendInput.
+    Never raises.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        imm32 = ctypes.WinDLL("imm32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        imm32.ImmGetDefaultIMEWnd.argtypes = (wintypes.HWND,)
+        imm32.ImmGetDefaultIMEWnd.restype = wintypes.HWND
+        user32.SendMessageW.argtypes = (
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        )
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+
+        foreground = user32.GetForegroundWindow()
+        if not foreground:
+            return False
+        ime_window = imm32.ImmGetDefaultIMEWnd(foreground)
+        if not ime_window:
+            return False
+        mode = user32.SendMessageW(
+            ime_window, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0
+        )
+        user32.SendMessageW(
+            ime_window,
+            WM_IME_CONTROL,
+            IMC_SETCONVERSIONMODE,
+            mode ^ IME_CMODE_NATIVE,
+        )
+        return True
+    except Exception:  # noqa: BLE001 - IME access is best-effort
+        return False
+
+
 class WindowsInputSink:
     """Injects input via SendInput. Instantiate only on Windows."""
 
     def __init__(self) -> None:
         if sys.platform != "win32":
             raise RuntimeError("WindowsInputSink is only available on Windows")
+        # True while a 한/영 press was satisfied by the IME path, so the paired
+        # key-up is swallowed instead of injecting a stray VK_HANGUL.
+        self._hangul_handled_by_ime = False
         self._send_input = ctypes.windll.user32.SendInput
         self._send_input.argtypes = (
             wintypes.UINT,
@@ -198,6 +255,16 @@ class WindowsInputSink:
         virtual_key = _VIRTUAL_KEYS.get(code)
         if virtual_key is None:
             return
+        if code == "Lang1":
+            # Prefer the IME conversion-mode switch; only fall back to injecting
+            # VK_HANGUL when there is no IME window to talk to.
+            if action == "down":
+                self._hangul_handled_by_ime = toggle_hangul_ime()
+                if self._hangul_handled_by_ime:
+                    return
+            elif self._hangul_handled_by_ime:
+                self._hangul_handled_by_ime = False
+                return
         flags = KEYEVENTF_KEYUP if action == "up" else 0
         keyboard = _KEYBDINPUT(
             wVk=virtual_key, wScan=0, dwFlags=flags, time=0, dwExtraInfo=0

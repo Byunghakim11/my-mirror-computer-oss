@@ -11,6 +11,14 @@ function makeEvent(type: string, props: Record<string, unknown> = {}): Event {
   return Object.assign(event, props)
 }
 
+// Pointer moves and wheel deltas are coalesced into one send per animation
+// frame, so tests must let that frame run before asserting.
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve())
+  })
+}
+
 function createSenders(): InputSenders & Record<string, ReturnType<typeof vi.fn>> {
   return {
     releaseRemoteInput: vi.fn(),
@@ -162,16 +170,52 @@ describe('useInputCapture pointer forwarding', () => {
     expect(video.releasePointerCapture).toHaveBeenCalledWith(7)
   })
 
-  it('inverts and clamps the wheel delta for Windows', () => {
+  it('inverts and clamps the wheel delta for Windows', async () => {
     const video = createVideo()
     const ref = { current: video }
     renderHook(() => useInputCapture(ref, true, senders))
 
     video.dispatchEvent(makeEvent('wheel', { deltaX: 10, deltaY: 100 }))
-    video.dispatchEvent(makeEvent('wheel', { deltaX: 0, deltaY: -5000 }))
+    await nextAnimationFrame()
 
     expect(senders.sendPointerWheel).toHaveBeenNthCalledWith(1, 10, -100)
+
+    video.dispatchEvent(makeEvent('wheel', { deltaX: 0, deltaY: -5000 }))
+    await nextAnimationFrame()
+
     expect(senders.sendPointerWheel).toHaveBeenNthCalledWith(2, 0, 1200)
+  })
+
+  it('coalesces a burst of wheel events into one summed delta per frame', async () => {
+    // A fast scroll fires many events; sending each one floods the channel and
+    // trips the remote rate limit (choppy scrolling). One summed event per
+    // frame scrolls the same distance smoothly.
+    const video = createVideo()
+    const ref = { current: video }
+    renderHook(() => useInputCapture(ref, true, senders))
+
+    for (let index = 0; index < 10; index += 1) {
+      video.dispatchEvent(makeEvent('wheel', { deltaX: 0, deltaY: 10 }))
+    }
+    await nextAnimationFrame()
+
+    expect(senders.sendPointerWheel).toHaveBeenCalledTimes(1)
+    expect(senders.sendPointerWheel).toHaveBeenCalledWith(0, -100)
+  })
+
+  it('coalesces pointer moves to the latest position per frame', async () => {
+    const video = createVideo()
+    const ref = { current: video }
+    renderHook(() => useInputCapture(ref, true, senders))
+    const move = senders.sendPointerMove as unknown as ReturnType<typeof vi.fn>
+    move.mockClear()
+
+    video.dispatchEvent(makeEvent('pointermove', { clientX: 100, clientY: 100 }))
+    video.dispatchEvent(makeEvent('pointermove', { clientX: 200, clientY: 150 }))
+    video.dispatchEvent(makeEvent('pointermove', { clientX: 300, clientY: 200 }))
+    await nextAnimationFrame()
+
+    expect(move).toHaveBeenCalledTimes(1)
   })
 
   it('suppresses the native context menu', () => {
@@ -356,6 +400,9 @@ describe('useInputCapture touch gestures (mobile)', () => {
       }),
     )
     expect(senders.sendPointerButton).toHaveBeenCalledWith('left', 'down')
+    // Drag movement is coalesced into the next animation frame (fake timers
+    // drive rAF here), so let that frame run before asserting it streamed.
+    vi.advanceTimersByTime(20)
     expect(move).toHaveBeenCalled()
     vi.useRealTimers()
   })

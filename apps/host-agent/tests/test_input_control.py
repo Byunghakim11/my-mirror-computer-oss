@@ -308,3 +308,51 @@ class Utf16CodeUnitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RateLimitHeadroomTests(unittest.TestCase):
+    """The limits must sit ABOVE ordinary human input, not below it.
+
+    Regression: the old 120 moves/sec and 60 actions/sec clipped a normal mouse
+    (125-1000 Hz) and fast wheel scrolling, which showed up as a laggy cursor
+    and choppy scroll rather than as any error.
+    """
+
+    def _controller(self) -> InputController:
+        controller = InputController(FakeInputSink(), frame_width=1280, frame_height=720)
+        controller.set_source_size(1280, 720)
+        return controller
+
+    def test_a_full_second_of_60fps_wheel_scrolling_is_never_dropped(self) -> None:
+        controller = self._controller()
+        applied = 0
+        for index in range(60):
+            applied += controller.handle(
+                {
+                    "data": {"deltaX": 0, "deltaY": 120},
+                    "event": "pointer.wheel",
+                    "sequence": index + 1,
+                    "sessionId": "session_0123456789abcdef",
+                    "timestamp": 1_000_000,
+                    "version": 1,
+                },
+                now=1.0 + index / 60.0,
+            )
+        self.assertEqual(applied, 60)
+
+    def test_a_full_second_of_60fps_pointer_motion_is_never_dropped(self) -> None:
+        controller = self._controller()
+        applied = 0
+        for index in range(60):
+            applied += controller.handle(
+                {
+                    "data": {"x": 0.5, "y": 0.5},
+                    "event": "pointer.move",
+                    "sequence": index + 1,
+                    "sessionId": "session_0123456789abcdef",
+                    "timestamp": 1_000_000,
+                    "version": 1,
+                },
+                now=1.0 + index / 60.0,
+            )
+        self.assertEqual(applied, 60)

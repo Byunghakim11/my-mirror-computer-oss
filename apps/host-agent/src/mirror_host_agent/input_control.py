@@ -155,8 +155,14 @@ class InputController:
         *,
         frame_width: int,
         frame_height: int,
-        rate_limit_per_second: int = 120,
-        action_rate_limit_per_second: int = 60,
+        # Ceilings that bound a hostile flood without clipping real use. The
+        # previous 120/60 sat *below* ordinary input: a mouse reports 125-1000
+        # moves/sec and a fast wheel scroll easily exceeds 60 events/sec, so
+        # legitimate motion was dropped (laggy cursor, choppy scrolling). The
+        # viewer now coalesces per animation frame (~60/sec each), leaving these
+        # as pure safety limits with generous headroom.
+        rate_limit_per_second: int = 360,
+        action_rate_limit_per_second: int = 240,
         watchdog_seconds: float = 3.0,
     ) -> None:
         self._sink = sink
