@@ -533,6 +533,38 @@ class VideoProfileConfigureTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class TurnCredentialTests(unittest.TestCase):
+    """TURN relay is what makes firewalled/UDP-blocked networks work at all."""
+
+    def test_http_get_sends_an_explicit_user_agent(self) -> None:
+        # Regression: urllib's default "Python-urllib/x.y" is 403'd by
+        # Cloudflare bot protection (error 1010), which silently downgraded
+        # every session to STUN-only.
+        captured: dict[str, Any] = {}
+
+        class _FakeResponse:
+            def __enter__(self):  # noqa: ANN204 - test double
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"iceServers": []}'
+
+        def fake_urlopen(request: Any, timeout: int = 0) -> Any:
+            captured["headers"] = dict(request.headers)
+            return _FakeResponse()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            M0Agent._http_get_json("https://example.invalid/turn?ticket=x")
+
+        agent_header = {k.lower(): v for k, v in captured["headers"].items()}
+        self.assertIn("user-agent", agent_header)
+        self.assertNotIn("python-urllib", agent_header["user-agent"].lower())
+
+
 class ClipboardTests(unittest.TestCase):
     def _agent(self, clipboard_enabled: bool) -> M0Agent:
         return M0Agent(

@@ -38,6 +38,9 @@ from .video import (
 
 LOGGER = logging.getLogger("mirror_host_agent")
 PROTOCOL_VERSION = 1
+# Sent on the agent's own HTTP calls (e.g. /turn). Cloudflare's bot protection
+# 403s urllib's default "Python-urllib/x.y" User-Agent.
+HTTP_USER_AGENT = "MirrorHostAgent/1.0"
 MAX_SIGNALING_BYTES = 256 * 1024
 # Raw per-message cap on the control DataChannel. Sized for the largest control
 # message: a clipboard.set carrying up to CLIPBOARD_TEXT_MAX_LENGTH (16384)
@@ -491,7 +494,14 @@ class M0Agent:
     def _http_get_json(url: str) -> Any:
         import urllib.request
 
-        with urllib.request.urlopen(url, timeout=10) as response:  # noqa: S310 - https only
+        # An explicit User-Agent is REQUIRED, not cosmetic: Cloudflare's bot
+        # protection rejects urllib's default "Python-urllib/x.y" with 403
+        # (error 1010), which silently downgraded every session to STUN-only —
+        # the relay that firewalled/UDP-blocked networks depend on.
+        request = urllib.request.Request(
+            url, headers={"user-agent": HTTP_USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - https only
             return json.loads(response.read().decode("utf-8"))
 
     async def _fetch_ice_servers(self) -> list[RTCIceServer]:
@@ -502,9 +512,14 @@ class M0Agent:
         try:
             payload = await asyncio.to_thread(self._http_get_json, turn_url)
         except Exception as error:  # noqa: BLE001 - TURN is best-effort; fall back to STUN
+            # Include the HTTP status when there is one: a bare exception name
+            # hid a 403 here for weeks while every session silently ran without
+            # a relay. The URL (which carries the ticket) is never logged.
+            status = getattr(error, "code", None)
             LOGGER.warning(
-                "TURN credential fetch failed (%s); using STUN only",
+                "TURN credential fetch failed (%s%s); using STUN only",
                 type(error).__name__,
+                f" HTTP {status}" if status is not None else "",
             )
             return servers
         entries = payload.get("iceServers", []) if isinstance(payload, dict) else []
